@@ -21,10 +21,10 @@ public class PeerClient {
 
 
     public static void main(String[] args) {
-        if (args.length != 3) {
-            System.out.println("Usage: java PeerClient <serverHost> <serverPort> <myListenPort> <sharedDirectory>");
-            return;
-        }
+        if (args.length != 4) {
+    System.out.println("Usage: java PeerClient <serverHost> <serverPort> <myListenPort> <sharedDirectory>");
+    return;
+}
 
         try {
             String serverHost = args[0];
@@ -44,7 +44,7 @@ PeerClient client = new PeerClient(serverHost, serverPort, myListenPort, fileHan
     }
 
     public void start() throws IOException {
-        new Thread(new DownloadListener(myListenPort, sharedDirectory)).start();
+        new Thread(new DownloadListener(myListenPort, fileHandler)).start();
 
         try (
                 Socket serverSocket = new Socket(serverHost, serverPort);
@@ -165,7 +165,7 @@ PeerClient client = new PeerClient(serverHost, serverPort, myListenPort, fileHan
 
     private static class DownloadListener implements Runnable {
         private final int port;
-        private final Filehandler fileHandler;
+        private final FileHandler fileHandler;
 
         public DownloadListener(int port, FileHandler fileHandler) {
             this.port = port;
