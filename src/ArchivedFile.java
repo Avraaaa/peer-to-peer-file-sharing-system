@@ -1,5 +1,5 @@
 public class ArchivedFile extends SharedFile {
-    private int fileCount;
+    private final int fileCount;
 
     public ArchivedFile(String name, long size, int fileCount) {
         super(name, size);
@@ -13,3 +13,4 @@ public class ArchivedFile extends SharedFile {
                 + "  Contains: " + fileCount + " files";
     }
 }
+
