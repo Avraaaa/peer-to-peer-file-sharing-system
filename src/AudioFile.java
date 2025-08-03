@@ -1,7 +1,7 @@
 public class AudioFile extends SharedFile {
-    private String artist;
-    private String album;
-    private int durationSeconds;
+    private final String artist;
+    private final String album;
+    private final int durationSeconds;
 
     public AudioFile(String name, long size, String artist, String album, int durationSeconds) {
         super(name, size);
@@ -38,3 +38,4 @@ public class AudioFile extends SharedFile {
                 "  Duration: " + minutes + ":" + String.format("%02d", seconds);
     }
 }
+
