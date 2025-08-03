@@ -84,18 +84,15 @@ PeerClient client = new PeerClient(serverHost, serverPort, myListenPort, fileHan
         }
     }
 
-    private void shareLocalFiles(PrintWriter serverOut) {
-        System.out.println("Sharing files from: " + sharedDirectory.toAbsolutePath());
-        try (Stream<Path> files = Files.list(sharedDirectory)) {
-            files.filter(Files::isRegularFile).forEach(file -> {
-                String fileName = file.getFileName().toString();
-                System.out.println("...sharing " + fileName);
-                serverOut.println("SHARE " + fileName);
-            });
-        } catch (IOException e) {
-            System.err.println("Warning: Could not read shared directory: " + e.getMessage());
-        }
+  private void shareLocalFiles(PrintWriter serverOut) {
+    System.out.println("Sharing files:");
+    List<String> files = fileHandler.listSharedFiles();
+    for (String fileName : files) {
+        System.out.println("...sharing " + fileName);
+        serverOut.println("SHARE " + fileName);
     }
+}
+
 
     private void listPeers(PrintWriter out, BufferedReader in) throws IOException {
         out.println("LIST_PEERS");
@@ -150,7 +147,7 @@ PeerClient client = new PeerClient(serverHost, serverPort, myListenPort, fileHan
                 Socket peerSocket = new Socket(host, port);
                 PrintWriter peerOut = new PrintWriter(peerSocket.getOutputStream(), true);
                 InputStream peerIn = peerSocket.getInputStream();
-                FileOutputStream fileOut = new FileOutputStream(sharedDirectory.resolve(fileName).toFile())
+                OutputStream fileOut = fileHandler.getOutputStream(fileName);
         ) {
             peerOut.println("DOWNLOAD " + fileName);
 
@@ -168,11 +165,11 @@ PeerClient client = new PeerClient(serverHost, serverPort, myListenPort, fileHan
 
     private static class DownloadListener implements Runnable {
         private final int port;
-        private final Path sharedDirectory;
+        private final Filehandler fileHandler;
 
-        public DownloadListener(int port, Path sharedDirectory) {
+        public DownloadListener(int port, FileHandler fileHandler) {
             this.port = port;
-            this.sharedDirectory = sharedDirectory;
+            this.fileHandler= fileHandler;
         }
 
         @Override
@@ -196,13 +193,18 @@ PeerClient client = new PeerClient(serverHost, serverPort, myListenPort, fileHan
                 String request = in.readLine();
                 if (request != null && request.startsWith("DOWNLOAD ")) {
                     String fileName = request.substring(9);
-                    Path filePath = sharedDirectory.resolve(fileName);
-
-                    if (Files.exists(filePath)) {
-                        System.out.println("-> Uploading " + fileName + " to " + peerConnection.getRemoteSocketAddress());
-                        Files.copy(filePath, out);
-                        System.out.println("-> Upload finished for " + fileName);
-                    } else {
+                    
+                    if (fileHandler.fileExists(fileName)) {
+                            try (InputStream fileIn = fileHandler.getInputStream(fileName)) {
+                            byte[] buffer = new byte[8192];
+                              int bytesRead;
+                            while ((bytesRead = fileIn.read(buffer)) != -1) {
+                            out.write(buffer, 0, bytesRead);
+                            }
+                        }
+                    System.out.println("-> Upload finished for " + fileName);
+                }
+                else {
                         System.err.println("Peer requested a file we don't have: " + fileName);
                     }
                 }
