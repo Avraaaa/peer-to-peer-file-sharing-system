@@ -32,9 +32,8 @@ public class PeerClient {
             int myListenPort = Integer.parseInt(args[1]);
             String sharedDir = args[2];
 
-            Files.createDirectories(Paths.get(sharedDir));
-
-            PeerClient client = new PeerClient(serverHost, serverPort, myListenPort, sharedDir);
+            FileHandler fileHandler = new LocalFileHandler(sharedDir);
+PeerClient client = new PeerClient(serverHost, serverPort, myListenPort, fileHandler);
             client.start();
 
         } catch (NumberFormatException e) {
