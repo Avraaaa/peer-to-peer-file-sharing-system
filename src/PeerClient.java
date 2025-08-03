@@ -323,8 +323,7 @@ public class PeerClient {
                     }
                 }
             } catch (IOException e) {
-                System.err.println("Error during file download: " + e.getMessage());
-                e.printStackTrace(System.err);
+                e.printStackTrace();
 
             } finally {
                 try { peerConnection.close(); } catch (IOException e) { /* Ignore */ }
