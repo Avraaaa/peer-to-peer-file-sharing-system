@@ -10,14 +10,15 @@ public class PeerClient {
     private final String serverHost;
     private final int serverPort;
     private final int myListenPort;
-    private final Path sharedDirectory;
+    private final FileHandler fileHandler;
 
-    public PeerClient(String serverHost, int serverPort, int myListenPort, String sharedDir) {
-        this.serverHost = serverHost;
-        this.serverPort = serverPort;
-        this.myListenPort = myListenPort;
-        this.sharedDirectory = Paths.get(sharedDir);
-    }
+  public PeerClient(String serverHost, int serverPort, int myListenPort, FileHandler fileHandler) {
+    this.serverHost = serverHost;
+    this.serverPort = serverPort;
+    this.myListenPort = myListenPort;
+    this.fileHandler = fileHandler;
+}
+
 
     public static void main(String[] args) {
         if (args.length != 3) {
