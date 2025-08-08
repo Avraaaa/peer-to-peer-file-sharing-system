@@ -12,17 +12,16 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class AccountService {
 
-    // **MODIFIED**: Renamed variable for clarity
     private final Path userCsvPath;
     private final Map<String, User> users = new ConcurrentHashMap<>();
     private static final int CAESAR_SHIFT_AMOUNT = 5;
+    private final int MAX_RETRIES = 3;
+    private final int RETRY_DELAY_MS = 100;
 
-    // **MODIFIED**: Renamed parameter for clarity
     public AccountService(String userCsvPath) {
         this.userCsvPath = Paths.get(userCsvPath);
         try {
             if (!Files.exists(this.userCsvPath)) {
-                // The header for the CSV file
                 try (PrintWriter writer = new PrintWriter(new FileWriter(this.userCsvPath.toFile()))) {
                     writer.println("username,passwordHash,sharedDirectory");
                 } catch (IOException e) {
@@ -42,7 +41,7 @@ public class AccountService {
         try {
             lines = Files.readAllLines(userCsvPath);
             // Skip header or if file is empty
-            if (lines.isEmpty() || lines.size() <= 1) {
+            if (lines.size() <= 1) {
                 users.putIfAbsent("admin", new AdminUser(hashPassword("admin")));
                 return;
             }
@@ -52,7 +51,6 @@ public class AccountService {
             users.putIfAbsent("admin", new AdminUser(hashPassword("admin")));
             return;
         }
-        // Start from 1 to skip the header line
         for (int i = 1; i < lines.size(); i++) {
             String line = lines.get(i);
             String[] parts = line.split(",", 3);
@@ -63,7 +61,6 @@ public class AccountService {
                 System.err.println("Warning: Corrupt line in user CSV file, skipping: " + line);
             }
         }
-        // Ensure the admin user always exists
         users.putIfAbsent("admin", new AdminUser(hashPassword("admin")));
     }
 
@@ -78,7 +75,7 @@ public class AccountService {
         String passwordHash = hashPassword(password);
         User newUser = new RegularUser(username, passwordHash, sharedDirectory);
         users.put(newUser.getUsername(), newUser);
-        rewriteUserCsvFile(); // Call the renamed method
+        rewriteUserCsvFile();
         return newUser;
     }
 
@@ -88,7 +85,7 @@ public class AccountService {
             return false; // Cannot remove the admin
         }
         if (users.remove(username) != null) {
-            rewriteUserCsvFile(); // Call the renamed method
+            rewriteUserCsvFile();
             return true;
         }
         return false;
@@ -103,13 +100,11 @@ public class AccountService {
         return null;
     }
 
-    // **MODIFIED**: Renamed method for clarity
     private void rewriteUserCsvFile() throws IOException {
-        Path tempFilePath = getTempCsvPath(); // Call the renamed method
+        Path tempFilePath = getTempCsvPath();
         List<String> lines = new ArrayList<>();
-        lines.add("username,passwordHash,sharedDirectory"); // CSV header
+        lines.add("username,passwordHash,sharedDirectory");
         for (User user : users.values()) {
-            // Don't write the default admin user to the file, it's managed in memory
             if (!user.isAdmin()) {
                 lines.add(String.join(",", user.getUsername(), user.getPasswordHash(), user.getSharedDirectory()));
             }
@@ -117,15 +112,14 @@ public class AccountService {
         Files.write(tempFilePath, lines);
 
         // Atomic move to prevent data corruption if the program crashes mid-write
-        final int MAX_RETRIES = 3;
-        final int RETRY_DELAY_MS = 100;
+
         for (int i = 0; i < MAX_RETRIES; i++) {
             try {
                 Files.move(tempFilePath, userCsvPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-                return; // Success
+                return;
             } catch (IOException e) {
-                if (i == MAX_RETRIES - 1) throw e; // Give up after last retry
-                System.err.println("Warning: Could not rewrite user CSV file, retrying...(" + (i + 1) + "/" + MAX_RETRIES + ")");
+                if (i == MAX_RETRIES - 1) throw e;
+                System.err.printf("Warning: Failed to rewrite user CSV file, retrying (%d/%d)%n", i + 1, MAX_RETRIES);
                 try {
                     Thread.sleep(RETRY_DELAY_MS * (i + 1));
                 } catch (InterruptedException ie) {
@@ -136,7 +130,6 @@ public class AccountService {
         }
     }
 
-    // **MODIFIED**: Renamed method for clarity
     private Path getTempCsvPath() {
         Path parentDir = userCsvPath.getParent();
         String tempFileName = userCsvPath.getFileName().toString() + ".tmp";

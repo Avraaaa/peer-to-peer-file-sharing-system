@@ -4,8 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
-public class
-LocalFileHandler implements FileHandler {
+public class LocalFileHandler implements FileHandler {
     private final Path sharedDirectory;
 
     public LocalFileHandler(String sharedDirPath) throws IOException {

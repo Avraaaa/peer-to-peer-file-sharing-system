@@ -74,12 +74,9 @@ public class Server {
             String clientIdentifier = socket.getRemoteSocketAddress().toString();
             System.out.println("Connected: " + clientIdentifier);
 
-            try (
-                    BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-                    PrintWriter out = new PrintWriter(socket.getOutputStream(), true)
-            ) {
+            try (Transport transport = new TCPTransport(socket)) {
                 String command;
-                while ((command = in.readLine()) != null) {
+                while ((command = transport.readline()) != null) {
                     if (loggedInUser != null) {
                         clientIdentifier = loggedInUser.getUsername();
                     }
@@ -91,18 +88,18 @@ public class Server {
                         case "LOGIN":
                             String[] loginParts = command.split(" ", 3);
                             if (loginParts.length < 3) continue;
-                            handleLogin(loginParts[1], loginParts[2], out);
+                            handleLogin(loginParts[1], loginParts[2], transport);
                             break;
 
                         case "SIGNUP":
                             String[] signupParts = command.split(" ", 4);
                             if (signupParts.length < 4) continue;
-                            handleSignUp(signupParts[1], signupParts[2], signupParts[3], out);
+                            handleSignUp(signupParts[1], signupParts[2], signupParts[3], transport);
                             break;
 
                         case "REGISTER":
                             if (loggedInUser == null) {
-                                out.println("ERROR Not logged in");
+                                transport.sendLine("ERROR Not logged in");
                                 continue;
                             }
                             if (parts.length < 2) continue;
@@ -110,7 +107,7 @@ public class Server {
                             break;
                         case "SHARE":
                             if (loggedInUser == null || peerInfo == null) {
-                                out.println("ERROR Not logged in or peer not registered");
+                                transport.sendLine("ERROR Not logged in or peer not registered");
                                 continue;
                             }
                             if (parts.length < 2) continue;
@@ -118,35 +115,35 @@ public class Server {
                             break;
                         case "SEARCH":
                             if (loggedInUser == null) {
-                                out.println("ERROR Not logged in");
+                                transport.sendLine("ERROR Not logged in");
                                 continue;
                             }
                             if (parts.length < 2) continue;
-                            handleSearch(parts[1], out);
+                            handleSearch(parts[1], transport);
                             break;
                         case "LIST_PEERS":
                             if (loggedInUser == null) {
-                                out.println("ERROR Not logged in");
+                                transport.sendLine("ERROR Not logged in");
                                 continue;
                             }
-                            handleListPeers(out);
+                            handleListPeers(transport);
                             break;
                         case "REMOVE_USER":
                             if (loggedInUser == null) {
-                                out.println("ERROR Not logged in");
+                                transport.sendLine("ERROR Not logged in");
                                 continue;
                             }
                             if (!loggedInUser.isAdmin()) {
-                                out.println("ERROR Not authorized");
+                                transport.sendLine("ERROR Not authorized");
                                 continue;
                             }
                             if (parts.length < 2) continue;
-                            handleRemoveUser(parts[1], out);
+                            handleRemoveUser(parts[1], transport);
                             break;
                         case "UNREGISTER":
                             return;
                         default:
-                            out.println("ERROR Unknown command");
+                            transport.sendLine("ERROR Unknown command");
                     }
                 }
             } catch (IOException e) {
@@ -162,7 +159,7 @@ public class Server {
             }
         }
 
-        private void handleLogin(String username, String password, PrintWriter out) {
+        private void handleLogin(String username, String password, Transport transport) throws IOException {
             User user = accountService.login(username, password);
             if (user != null) {
                 this.loggedInUser = user;
@@ -171,23 +168,23 @@ public class Server {
                         String.valueOf(user.isAdmin()),
                         user.getSharedDirectory()
                 );
-                out.println("LOGIN_SUCCESS " + payload);
+                transport.sendLine("LOGIN_SUCCESS " + payload);
                 System.out.println("User '" + username + "' logged in successfully.");
             } else {
-                out.println("LOGIN_FAIL Invalid username or password.");
+                transport.sendLine("LOGIN_FAIL Invalid username or password.");
                 System.out.println("Failed login attempt for user '" + username + "'.");
             }
         }
 
-        private void handleSignUp(String username, String password, String sharedDirectory, PrintWriter out) {
+        private void handleSignUp(String username, String password, String sharedDirectory, Transport transport) throws IOException {
             try {
                 User newUser = accountService.createUser(username, password, sharedDirectory);
                 if (newUser != null) {
-                    out.println("SIGNUP_SUCCESS User created. Please login.");
+                    transport.sendLine("SIGNUP_SUCCESS User created. Please login.");
                     System.out.println("New user signed up: " + username + " with shared dir: " + sharedDirectory);
                 }
             } catch (IOException e) {
-                out.println("SIGNUP_FAIL " + e.getMessage());
+                transport.sendLine("SIGNUP_FAIL " + e.getMessage());
                 System.err.println("Failed to create user '" + username + "': " + e.getMessage());
             }
         }
@@ -226,7 +223,7 @@ public class Server {
         }
 
 
-        private void handleSearch(String fileName, PrintWriter out) {
+        private void handleSearch(String fileName, Transport transport) throws IOException {
             StringBuilder sb = new StringBuilder();
             synchronized (fileRegistry) {
                 for (FileEntry entry : fileRegistry) {
@@ -240,10 +237,10 @@ public class Server {
                     }
                 }
             }
-            out.println(sb);
+            transport.sendLine(sb.toString());
         }
 
-        private void handleListPeers(PrintWriter out) {
+        private void handleListPeers(Transport transport) throws IOException {
             StringBuilder sb = new StringBuilder();
             synchronized (activePeers) {
                 for (int i = 0; i < activePeers.size(); i++) {
@@ -253,19 +250,19 @@ public class Server {
                     }
                 }
             }
-            out.println(sb);
+            transport.sendLine(sb.toString());
         }
 
-        private void handleRemoveUser(String username, PrintWriter out) {
+        private void handleRemoveUser(String username, Transport transport) throws IOException {
             try {
                 if (accountService.removeUser(username)) {
-                    out.println("REMOVE_SUCCESS " + username + " removed.");
+                    transport.sendLine("REMOVE_SUCCESS " + username + " removed.");
                     System.out.println("Admin '" + loggedInUser.getUsername() + "' removed user '" + username + "'");
                 } else {
-                    out.println("REMOVE_FAIL User not found or cannot be removed.");
+                    transport.sendLine("REMOVE_FAIL User not found or cannot be removed.");
                 }
             } catch (IOException e) {
-                out.println("REMOVE_FAIL Error removing user: " + e.getMessage());
+                transport.sendLine("REMOVE_FAIL Error removing user: " + e.getMessage());
                 System.err.println("Error removing user '" + username + "': " + e.getMessage());
             }
         }

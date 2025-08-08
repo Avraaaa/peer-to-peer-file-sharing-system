@@ -36,9 +36,7 @@ public class PeerClient {
 
     public void start() {
         try (
-                Socket serverSocket = new Socket(serverHost, serverPort);
-                PrintWriter out = new PrintWriter(serverSocket.getOutputStream(), true);
-                BufferedReader in = new BufferedReader(new InputStreamReader(serverSocket.getInputStream()));
+                Transport serverTransport = new TCPTransport(serverHost, serverPort);
                 Scanner console = new Scanner(System.in)
         ) {
             System.out.println("Connected to the Napster server.");
@@ -48,8 +46,8 @@ public class PeerClient {
                     showPreLoginMenu();
                     String choice = console.nextLine();
                     switch (choice) {
-                        case "1": handleLogin(out, in, console); break;
-                        case "2": handleSignUp(out, in, console); break;
+                        case "1": handleLogin(serverTransport, console); break;
+                        case "2": handleSignUp(serverTransport, console); break;
                         case "3": System.out.println("Exiting client."); return;
                         default: System.out.println("Invalid option. Please try again.");
                     }
@@ -57,14 +55,14 @@ public class PeerClient {
                     showPostLoginMenu();
                     String choice = console.nextLine();
                     switch (choice) {
-                        case "1": handleSearchAndDownload(out, in, console); break;
-                        case "2": handleListPeers(out, in); break;
+                        case "1": handleSearchAndDownload(serverTransport, console); break;
+                        case "2": handleListPeers(serverTransport); break;
                         case "3":
-                            if (loggedInUser.isAdmin) handleRemoveUser(out, in, console);
-                            else handleLogout(out);
+                            if (loggedInUser.isAdmin()) handleRemoveUser(serverTransport, console);
+                            else handleLogout(serverTransport);
                             break;
                         case "4":
-                            if (loggedInUser.isAdmin) handleLogout(out);
+                            if (loggedInUser.isAdmin()) handleLogout(serverTransport);
                             else System.out.println("Invalid option.");
                             break;
                         default: System.out.println("Invalid option. Please try again.");
@@ -89,10 +87,10 @@ public class PeerClient {
     }
 
     private void showPostLoginMenu() {
-        System.out.printf("\n--- Logged in as %s ---\n", loggedInUser.username);
+        System.out.printf("\n--- Logged in as %s ---\n", loggedInUser.getUsername());
         System.out.println("[1] Search for a file");
         System.out.println("[2] List online peers");
-        if (loggedInUser.isAdmin) {
+        if (loggedInUser.isAdmin()) {
             System.out.println("[3] Remove a user (Admin)");
             System.out.println("[4] Logout");
         } else {
@@ -101,7 +99,7 @@ public class PeerClient {
         System.out.print("> ");
     }
 
-    private void handleLogin(PrintWriter out, BufferedReader in, Scanner console) throws IOException {
+    private void handleLogin(Transport serverTransport, Scanner console) throws IOException {
         System.out.print("Enter username: ");
         String username = console.nextLine();
         System.out.print("Enter password: ");
@@ -109,26 +107,34 @@ public class PeerClient {
         System.out.print("Enter a port for listening to downloads: ");
         this.myListenPort = Integer.parseInt(console.nextLine());
 
-        out.println("LOGIN " + username + " " + password);
-        String response = in.readLine();
+        serverTransport.sendLine("LOGIN " + username + " " + password);
+        String response = serverTransport.readline();
 
         if (response != null && response.startsWith("LOGIN_SUCCESS")) {
             String[] parts = response.split(" ", 2);
             String[] payload = parts[1].split(";", 3);
 
-            this.loggedInUser = new User(payload[0], Boolean.parseBoolean(payload[1]));
+            // Create appropriate User instance based on admin status
+            String receivedUsername = payload[0];
+            boolean isAdmin = Boolean.parseBoolean(payload[1]);
             String sharedDirFromServer = payload[2];
 
-            System.out.println("Login successful. Welcome, " + loggedInUser.username + "!");
+            if (isAdmin) {
+                this.loggedInUser = new AdminUser(""); //PasswordHash not needed on client side
+            } else {
+                this.loggedInUser = new RegularUser(receivedUsername, "", sharedDirFromServer);
+            }
+
+            System.out.println("Login successful. Welcome, " + loggedInUser.getUsername() + "!");
             System.out.println("Your registered shared directory is: " + sharedDirFromServer);
 
-            initializeLocalServices(sharedDirFromServer, out);
+            initializeLocalServices(sharedDirFromServer, serverTransport);
         } else {
             System.out.println("Login failed: " + (response != null ? response : "No response from server."));
         }
     }
 
-    private void handleSignUp(PrintWriter out, BufferedReader in, Scanner console) throws IOException {
+    private void handleSignUp(Transport serverTransport, Scanner console) throws IOException {
         System.out.print("Choose a username: ");
         String username = console.nextLine();
         System.out.print("Choose a password: ");
@@ -136,8 +142,8 @@ public class PeerClient {
         System.out.print("Enter path to your shared folder (e.g., 'my_files' or 'C:\\Users\\YourUser\\p2p_share'): ");
         String sharedDirectoryPath = console.nextLine();
 
-        out.println("SIGNUP " + username + " " + password + " " + sharedDirectoryPath);
-        String response = in.readLine();
+        serverTransport.sendLine("SIGNUP " + username + " " + password + " " + sharedDirectoryPath);
+        String response = serverTransport.readline();
         if (response != null && response.startsWith("SIGNUP_SUCCESS")) {
             System.out.println("Signup successful! You can now log in.");
         } else {
@@ -145,32 +151,32 @@ public class PeerClient {
         }
     }
 
-    private void handleLogout(PrintWriter out) {
+    private void handleLogout(Transport serverTransport) throws IOException {
         System.out.println("Logging out...");
-        out.println("UNREGISTER");
+        serverTransport.sendLine("UNREGISTER");
         shutdownLocalServices();
         this.loggedInUser = null;
         this.knownSharedFiles.clear();
     }
 
-    private void initializeLocalServices(String sharedDirectoryPath, PrintWriter serverOut) throws IOException {
+    private void initializeLocalServices(String sharedDirectoryPath, Transport serverTransport) throws IOException {
         this.fileHandler = new LocalFileHandler(sharedDirectoryPath);
         Path sharedDir = ((LocalFileHandler) fileHandler).getSharedDirectory().toAbsolutePath();
         this.downloadStrategy = new ChunkedDownload(8192, fileHandler, sharedDir);
         System.out.println("File sharing is active for directory: " + sharedDir);
-        
+
         this.downloadListenerSocket = new ServerSocket(myListenPort);
         this.downloadListenerThread = new Thread(new DownloadListener(downloadListenerSocket, fileHandler));
         this.downloadListenerThread.start();
 
-        this.directoryWatcherThread = new Thread(new DirectoryWatcher(sharedDir, serverOut));
+        this.directoryWatcherThread = new Thread(new DirectoryWatcher(sharedDir, serverTransport));
         this.directoryWatcherThread.start();
 
-        serverOut.println("REGISTER " + myListenPort);
-        shareInitialFiles(serverOut);
+        serverTransport.sendLine("REGISTER " + myListenPort);
+        shareInitialFiles(serverTransport);
     }
 
-    private void shareInitialFiles(PrintWriter serverOut) {
+    private void shareInitialFiles(Transport serverTransport) {
         System.out.println("Sharing initial files...");
         List<String> files = fileHandler.listSharedFiles();
         if (files.isEmpty()) {
@@ -179,7 +185,11 @@ public class PeerClient {
             for (String fileName : files) {
                 if (knownSharedFiles.add(fileName)) {
                     System.out.println("... sharing " + fileName);
-                    serverOut.println("SHARE " + fileName);
+                    try {
+                        serverTransport.sendLine("SHARE " + fileName);
+                    } catch (IOException e) {
+                        System.err.println("Failed to share file " + fileName + ": " + e.getMessage());
+                    }
                 }
             }
         }
@@ -198,9 +208,9 @@ public class PeerClient {
         System.out.println("Local services shut down.");
     }
 
-    private void handleListPeers(PrintWriter out, BufferedReader in) throws IOException {
-        out.println("LIST_PEERS");
-        String response = in.readLine();
+    private void handleListPeers(Transport serverTransport) throws IOException {
+        serverTransport.sendLine("LIST_PEERS");
+        String response = serverTransport.readline();
         System.out.println("\n--- Online Peers ---");
         if (response == null || response.isEmpty()) {
             System.out.println("No other peers are online.");
@@ -210,11 +220,11 @@ public class PeerClient {
         System.out.println("--------------------");
     }
 
-    private void handleSearchAndDownload(PrintWriter out, BufferedReader in, Scanner console) throws IOException {
+    private void handleSearchAndDownload(Transport serverTransport, Scanner console) throws IOException {
         System.out.print("Enter filename to search for: ");
         String fileName = console.nextLine();
-        out.println("SEARCH " + fileName);
-        String response = in.readLine();
+        serverTransport.sendLine("SEARCH " + fileName);
+        String response = serverTransport.readline();
 
         if (response == null || response.isEmpty()) {
             System.out.println("File '" + fileName + "' not found on any peer.");
@@ -234,7 +244,7 @@ public class PeerClient {
             if (choice > 0 && choice <= peersWithFile.size()) {
                 String peerAddress = peersWithFile.get(choice - 1);
                 downloadFile(peerAddress, fileName);
-                out.println("SHARE " + fileName);
+                serverTransport.sendLine("SHARE " + fileName);
             } else {
                 System.out.println("Download cancelled.");
             }
@@ -242,36 +252,25 @@ public class PeerClient {
             System.out.println("Invalid input. Please enter a number.");
         }
     }
-    
-private void downloadFile(String peerAddress, String fileName) {
-    System.out.println("Attempting to download '" + fileName + "' from " + peerAddress + "...");
-    try {
-        downloadStrategy.download(peerAddress, fileName);
-        System.out.println("Download complete: " + fileName);
-    } catch (IOException e) {
-        System.err.println("Download failed: " + e.getMessage());
-    }
-}
 
-
-    private void handleRemoveUser(PrintWriter out, BufferedReader in, Scanner console) throws IOException {
-        System.out.print("Enter username to remove: ");
-        String userToRemove = console.nextLine();
-        out.println("REMOVE_USER " + userToRemove);
-        String response = in.readLine();
-        System.out.println("Server response: " + response);
-    }
-
-    private static class User {
-        final String username;
-        final boolean isAdmin;
-
-        User(String username, boolean isAdmin) {
-            this.username = username;
-            this.isAdmin = isAdmin;
+    private void downloadFile(String peerAddress, String fileName) {
+        System.out.println("Attempting to download '" + fileName + "' from " + peerAddress + "...");
+        try {
+            downloadStrategy.download(peerAddress, fileName);
+            System.out.println("Download complete: " + fileName);
+        } catch (IOException e) {
+            System.err.println("Download failed: " + e.getMessage());
         }
     }
 
+
+    private void handleRemoveUser(Transport serverTransport, Scanner console) throws IOException {
+        System.out.print("Enter username to remove: ");
+        String userToRemove = console.nextLine();
+        serverTransport.sendLine("REMOVE_USER " + userToRemove);
+        String response = serverTransport.readline();
+        System.out.println("Server response: " + response);
+    }
 
     private static class DownloadListener implements Runnable {
         private final ServerSocket listenerSocket;
@@ -300,24 +299,23 @@ private void downloadFile(String peerAddress, String fileName) {
         }
 
         private void handleDownloadRequest(Socket peerConnection) {
-            try (
-                    BufferedReader in = new BufferedReader(new InputStreamReader(peerConnection.getInputStream()));
-                    OutputStream out = peerConnection.getOutputStream()
-            ) {
-                String request = in.readLine();
+            try (Transport transport = new TCPTransport(peerConnection)) {
+                String request = transport.readline();
                 if (request != null && request.startsWith("DOWNLOAD ")) {
                     String fileName = request.substring(9);
                     if (fileHandler.fileExists(fileName)) {
                         try (InputStream fileIn = fileHandler.getInputStream(fileName)) {
-                            fileIn.transferTo(out);
+                            //Sending the stuff in 8KB chunks
+                            byte[] buffer = new byte[8192];
+                            int bytesRead;
+                            while ((bytesRead = fileIn.read(buffer)) != -1) {
+                                transport.sendBytes(buffer, bytesRead);
+                            }
                         }
                     }
                 }
             } catch (IOException e) {
                 e.printStackTrace();
-
-            } finally {
-                try { peerConnection.close(); } catch (IOException e) { /* Ignore */ }
             }
         }
     }
@@ -325,30 +323,30 @@ private void downloadFile(String peerAddress, String fileName) {
 
     private class DirectoryWatcher implements Runnable {
         private final Path path;
-        private final PrintWriter serverOut;
+        private final Transport serverTransport;
         private static final int POLLING_INTERVAL_MS = 3000;
 
-        DirectoryWatcher(Path path, PrintWriter serverOut) {
+        DirectoryWatcher(Path path, Transport serverTransport) {
             this.path = path;
-            this.serverOut = serverOut;
+            this.serverTransport = serverTransport;
         }
 
         @Override
         public void run() {
-            System.out.println("Directory watcher started for: " + path + " (polling every 5 seconds)");
+            System.out.println("Directory watcher started for: " + path + " (polling every 3 seconds)");
 
             try {
                 while (!Thread.currentThread().isInterrupted()) {
-
                     List<String> currentFilesOnDisk = fileHandler.listSharedFiles();
 
                     for (String fileName : currentFilesOnDisk) {
-
-
                         if (knownSharedFiles.add(fileName)) {
-
                             System.out.println("\n[Auto-Detector] New file found: " + fileName + ". Sharing with network...");
-                            serverOut.println("SHARE " + fileName);
+                            try {
+                                serverTransport.sendLine("SHARE " + fileName);
+                            } catch (IOException e) {
+                                System.err.println("Failed to auto-share file " + fileName + ": " + e.getMessage());
+                            }
                             System.out.print("> ");
                         }
                     }
@@ -356,12 +354,10 @@ private void downloadFile(String peerAddress, String fileName) {
                     Thread.sleep(POLLING_INTERVAL_MS);
                 }
             } catch (InterruptedException e) {
-
                 Thread.currentThread().interrupt();
             } finally {
                 System.out.println("Directory watcher stopped.");
             }
-
         }
     }
 }
