@@ -6,8 +6,14 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class PeerClient {
 
+    private static final String DEFAULT_SERVER_HOST = "localhost";
+    private static final int DEFAULT_SERVER_PORT = 9090;
+
     private final String serverHost;
     private final int serverPort;
+
+    private static final int MIN_PORT = 8001;
+    private static final int MAX_PORT = 10000;
 
     private User loggedInUser;
     private int myListenPort;
@@ -24,13 +30,27 @@ public class PeerClient {
         this.serverPort = serverPort;
     }
 
-    public static void main(String[] args) {
-        if (args.length != 2) {
-            System.out.println("Usage: java PeerClient <serverHost> <serverPort>");
-            return;
+
+    private int allocateAvailablePort() {
+        for (int port = MIN_PORT; port <= MAX_PORT; port++) {
+            try (ServerSocket testSocket = new ServerSocket(port)) {
+                System.out.println("Allocated port: " + port);
+                return port;
+            } catch (IOException e) {
+                // Port is in use :((
+            }
         }
-        String serverHost = args[0];
-        int serverPort = Integer.parseInt(args[1]);
+        System.err.println("No available ports found in range " + MIN_PORT + "-" + MAX_PORT);
+        return -1;
+    }
+
+    public static void main(String[] args) {
+        String serverHost = DEFAULT_SERVER_HOST;
+        int serverPort = DEFAULT_SERVER_PORT;
+
+
+
+        System.out.println("Connecting to server at " + serverHost + ":" + serverPort);
         new PeerClient(serverHost, serverPort).start();
     }
 
@@ -106,25 +126,48 @@ public class PeerClient {
         String username = console.nextLine();
         System.out.print("Enter password: ");
         String password = console.nextLine();
-        System.out.print("Enter a port for listening to downloads: ");
-        this.myListenPort = Integer.parseInt(console.nextLine());
+
+        System.out.println("Automatically allocating a port for file sharing...");
+        this.myListenPort = allocateAvailablePort();
+        if (this.myListenPort == -1) {
+            System.err.println("Failed to allocate a port. Cannot proceed with login.");
+            return;
+        }
 
         serverTransport.sendLine("LOGIN " + username + " " + password);
         String response = serverTransport.readLine();
 
         if (response != null && response.startsWith("LOGIN_SUCCESS")) {
             String[] parts = response.split(" ", 2);
-            String[] payload = parts[1].split(";", 3);
+            String[] payload = parts[1].split(";", 5);
 
             // Create appropriate User instance based on admin status
             String receivedUsername = payload[0];
             boolean isAdmin = Boolean.parseBoolean(payload[1]);
             String sharedDirFromServer = payload[2];
+            String downloadStatsStr = payload.length > 3 ? payload[3] : "";
+            String uploadStatsStr = payload.length > 4 ? payload[4] : "";
 
             if (isAdmin) {
-                this.loggedInUser = new AdminUser(""); //PasswordHash not needed on client side
+                DownloadStats downloadStats = new DownloadStats();
+                UploadStats uploadStats = new UploadStats();
+                if (!downloadStatsStr.isEmpty()) {
+                    downloadStats.fromCsvString(downloadStatsStr);
+                }
+                if (!uploadStatsStr.isEmpty()) {
+                    uploadStats.fromCsvString(uploadStatsStr);
+                }
+                this.loggedInUser = new AdminUser("", downloadStats, uploadStats);
             } else {
-                this.loggedInUser = new RegularUser(receivedUsername, "", sharedDirFromServer);
+                DownloadStats downloadStats = new DownloadStats();
+                UploadStats uploadStats = new UploadStats();
+                if (!downloadStatsStr.isEmpty()) {
+                    downloadStats.fromCsvString(downloadStatsStr);
+                }
+                if (!uploadStatsStr.isEmpty()) {
+                    uploadStats.fromCsvString(uploadStatsStr);
+                }
+                this.loggedInUser = new RegularUser(receivedUsername, "", sharedDirFromServer, downloadStats, uploadStats);
             }
 
             System.out.println("Login successful. Welcome, " + loggedInUser.getUsername() + "!");
@@ -168,7 +211,7 @@ public class PeerClient {
         System.out.println("File sharing is active for directory: " + sharedDir);
 
         this.downloadListenerSocket = new ServerSocket(myListenPort);
-        this.downloadListenerThread = new Thread(new DownloadListener(downloadListenerSocket, fileHandler, this));
+        this.downloadListenerThread = new Thread(new DownloadListener(downloadListenerSocket, fileHandler, this, serverTransport));
         this.downloadListenerThread.start();
 
         this.directoryWatcherThread = new Thread(new DirectoryWatcher(sharedDir, serverTransport));
@@ -217,7 +260,11 @@ public class PeerClient {
         if (response == null || response.isEmpty()) {
             System.out.println("No other peers are online.");
         } else {
-            Arrays.stream(response.split(",")).forEach(System.out::println);
+
+            String[] peers = response.split(",");
+            for (String peer : peers) {
+                System.out.println(peer);
+            }
         }
         System.out.println("--------------------");
     }
@@ -245,7 +292,7 @@ public class PeerClient {
             int choice = Integer.parseInt(console.nextLine());
             if (choice > 0 && choice <= peersWithFile.size()) {
                 String peerAddress = peersWithFile.get(choice - 1);
-                downloadFile(peerAddress, fileName);
+                downloadFile(peerAddress, fileName, serverTransport);
                 serverTransport.sendLine("SHARE " + fileName);
             } else {
                 System.out.println("Download cancelled.");
@@ -255,7 +302,7 @@ public class PeerClient {
         }
     }
 
-    private void downloadFile(String peerAddress, String fileName) {
+    private void downloadFile(String peerAddress, String fileName, Transport serverTransport) {
         System.out.println("Attempting to download '" + fileName + "' from " + peerAddress + "...");
         try {
             long fileSizeBefore = getFileSize(fileName);
@@ -267,6 +314,8 @@ public class PeerClient {
                 loggedInUser.getDownloadStats().addFile();
                 loggedInUser.getDownloadStats().addBytes(fileSizeAfter - fileSizeBefore);
                 System.out.println("Download complete: " + fileName + " (" + (fileSizeAfter - fileSizeBefore) + " bytes)");
+
+                sendStatsToServer(serverTransport);
             } else {
                 System.out.println("Download complete: " + fileName);
             }
@@ -299,21 +348,53 @@ public class PeerClient {
     private void handleViewStatistics() {
         System.out.println("\n--- Your Statistics ---");
         System.out.println("Downloaded files: " + loggedInUser.getDownloadStats().getFileCount());
-        System.out.println("Downloaded bytes: " + loggedInUser.getDownloadStats().getTotalBytes());
+        System.out.println("Downloaded bytes: " + formatFileSize(loggedInUser.getDownloadStats().getTotalBytes()));
         System.out.println("Uploaded files: " + loggedInUser.getUploadStats().getFileCount());
-        System.out.println("Uploaded bytes: " + loggedInUser.getUploadStats().getTotalBytes());
+        System.out.println("Uploaded bytes: " + formatFileSize(loggedInUser.getUploadStats().getTotalBytes()));
         System.out.println("-------------------------");
+    }
+
+    private String formatFileSize(long bytes) {
+        if (bytes == 0) return "0 B";
+
+        String[] units = {"B", "KB", "MB", "GB", "TB"};
+        int unitIndex = 0;
+        double size = bytes;
+
+        while (size >= 1024 && unitIndex < units.length - 1) {
+            size /= 1024;
+            unitIndex++;
+        }
+
+        if (unitIndex == 0) {
+            return String.format("%.0f %s", size, units[unitIndex]);
+        } else {
+            return String.format("%.2f %s", size, units[unitIndex]);
+        }
+    }
+
+    private void sendStatsToServer(Transport serverTransport) {
+        try {
+            String statsData = loggedInUser.getDownloadStats().toCsvString() + ";" +
+                              loggedInUser.getUploadStats().toCsvString();
+            serverTransport.sendLine("UPDATE_STATS " + statsData);
+            String response = serverTransport.readLine();
+        } catch (IOException e) {
+            System.err.println("Failed to send stats to server: " + e.getMessage());
+        }
     }
 
     private static class DownloadListener implements Runnable {
         private final ServerSocket listenerSocket;
         private final FileHandler fileHandler;
         private final PeerClient peerClient;
+        private final Transport serverTransport;
 
-        public DownloadListener(ServerSocket socket, FileHandler fileHandler, PeerClient peerClient) {
+        public DownloadListener(ServerSocket socket, FileHandler fileHandler, PeerClient peerClient, Transport serverTransport) {
             this.listenerSocket = socket;
             this.fileHandler = fileHandler;
             this.peerClient = peerClient;
+            this.serverTransport = serverTransport;
         }
 
         @Override
@@ -353,6 +434,8 @@ public class PeerClient {
                                 peerClient.loggedInUser.getUploadStats().addBytes(fileSize);
                                 System.out.println("\n[Upload] Sent " + fileName + " (" + fileSize + " bytes)");
                                 System.out.print("> ");
+
+                                peerClient.sendStatsToServer(serverTransport);
                             }
                         }
                     }

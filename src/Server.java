@@ -1,15 +1,20 @@
 import java.io.*;
 import java.net.*;
+import java.nio.file.Path;
 import java.util.*;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 
 public class Server {
 
     private static final int PORT = 9090;
+    private static final String OUTPUT_DIRECTORY = "out";
     private static final List<FileEntry> fileRegistry = new ArrayList<>();
     private static final List<PeerInfo> activePeers = new ArrayList<>();
-    private static final AccountService accountService = new AccountService("users.csv");
+    private static final AccountService accountService = new AccountService(OUTPUT_DIRECTORY + "/users.csv");
 
     public static void main(String[] args) throws IOException {
+        Files.createDirectories(Paths.get(OUTPUT_DIRECTORY));
         System.out.println("Simple Napster Server running on port " + PORT);
         try (ServerSocket serverSocket = new ServerSocket(PORT)) {
             while (true) {
@@ -155,7 +160,8 @@ public class Server {
                                 transport.sendLine("ERROR Not logged in");
                                 continue;
                             }
-                            handleUpdateStats(transport);
+                            if (parts.length < 2) continue;
+                            handleUpdateStats(parts[1], transport);
                             break;
                         default:
                             transport.sendLine("ERROR Unknown command");
@@ -181,7 +187,9 @@ public class Server {
                 String payload = String.join(";",
                         user.getUsername(),
                         String.valueOf(user.isAdmin()),
-                        user.getSharedDirectory()
+                        user.getSharedDirectory(),
+                        user.getDownloadStats().toCsvString(),
+                        user.getUploadStats().toCsvString()
                 );
                 transport.sendLine("LOGIN_SUCCESS " + payload);
                 System.out.println("User '" + username + "' logged in successfully.");
@@ -193,10 +201,20 @@ public class Server {
 
         private void handleSignUp(String username, String password, String sharedDirectory, Transport transport) throws IOException {
             try {
-                User newUser = accountService.createUser(username, password, sharedDirectory);
+                String fullSharedPath;
+                Path userPath = Paths.get(sharedDirectory);
+
+                if (userPath.isAbsolute()) {
+                    fullSharedPath = userPath.toString();
+                } else {
+                    String saneDirectory = userPath.getFileName().toString();
+                    fullSharedPath = OUTPUT_DIRECTORY + File.separator + saneDirectory;
+                }
+
+                User newUser = accountService.createUser(username, password, fullSharedPath);
                 if (newUser != null) {
                     transport.sendLine("SIGNUP_SUCCESS User created. Please login.");
-                    System.out.println("New user signed up: " + username + " with shared dir: " + sharedDirectory);
+                    System.out.println("New user signed up: " + username + " with shared dir: " + fullSharedPath);
                 }
             } catch (IOException e) {
                 transport.sendLine("SIGNUP_FAIL " + e.getMessage());
@@ -296,10 +314,24 @@ public class Server {
             }
         }
 
-        private void handleUpdateStats(Transport transport) throws IOException {
+        private void handleUpdateStats(String statsData, Transport transport) throws IOException {
+            try {
+                String[] statsParts = statsData.split(";");
+                if (statsParts.length == 2) {
+                    loggedInUser.getDownloadStats().fromCsvString(statsParts[0]);
+                    loggedInUser.getUploadStats().fromCsvString(statsParts[1]);
 
-            transport.sendLine("UPDATE_STATS_SUCCESS Stats are automatically tracked.");
-            System.out.println("Stats update request received from user '" + loggedInUser.getUsername() + "' (auto-tracking enabled)");
+                    accountService.saveUserStats(loggedInUser);
+
+                    transport.sendLine("UPDATE_STATS_SUCCESS Stats updated successfully.");
+                    System.out.println("Stats updated for user '" + loggedInUser.getUsername() + "': " + statsData);
+                } else {
+                    transport.sendLine("UPDATE_STATS_FAIL Invalid stats format.");
+                }
+            } catch (Exception e) {
+                transport.sendLine("UPDATE_STATS_FAIL Error updating stats: " + e.getMessage());
+                System.err.println("Error updating stats for user '" + loggedInUser.getUsername() + "': " + e.getMessage());
+            }
         }
     }
 }

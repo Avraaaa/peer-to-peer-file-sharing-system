@@ -53,15 +53,15 @@ public class AccountService {
         }
         for (int i = 1; i < lines.size(); i++) {
             String line = lines.get(i);
-            String[] parts = line.split(",", 5);
+            String[] parts = line.split(",");
             if (parts.length >= 3) {
                 User user = new RegularUser(parts[0], parts[1], parts[2]);
                 // Load stats if present
-                if (parts.length >= 4 && !parts[3].isEmpty()) {
-                    user.getDownloadStats().fromCsvString(parts[3]);
+                if (parts.length >= 5) {
+                    user.getDownloadStats().fromCsvString(parts[3] + "," + parts[4]);
                 }
-                if (parts.length >= 5 && !parts[4].isEmpty()) {
-                    user.getUploadStats().fromCsvString(parts[4]);
+                if (parts.length >= 7) {
+                    user.getUploadStats().fromCsvString(parts[5] + "," + parts[6]);
                 }
                 users.put(user.getUsername(), user);
             } else {
@@ -76,15 +76,19 @@ public class AccountService {
         UploadStats uploadStats = new UploadStats();
 
         // Try to load existing admin stats
-        Path adminStatsPath = userCsvPath.getParent().resolve("admin_stats.csv");
+        Path parentDir = userCsvPath.getParent();
+        Path adminStatsPath = (parentDir != null) ?
+            parentDir.resolve("admin_stats.csv") :
+            Paths.get("admin_stats.csv");
+
         if (Files.exists(adminStatsPath)) {
             try {
                 List<String> lines = Files.readAllLines(adminStatsPath);
                 if (lines.size() > 1) { // Skip header
                     String[] parts = lines.get(1).split(",");
-                    if (parts.length >= 2) {
-                        downloadStats.fromCsvString(parts[0]);
-                        uploadStats.fromCsvString(parts[1]);
+                    if (parts.length >= 4) {
+                        downloadStats.fromCsvString(parts[0] + "," + parts[1]);
+                        uploadStats.fromCsvString(parts[2] + "," + parts[3]);
                     }
                 }
             } catch (IOException e) {
@@ -207,8 +211,6 @@ public class AccountService {
     }
 
     public synchronized void saveUserStats(User user) throws IOException {
-
-        loadUsers();
         // For admin, we only save stats, not the full user record to CSV
         users.put(user.getUsername(), user);
 
@@ -223,7 +225,11 @@ public class AccountService {
 
     private void saveAdminStatsToFile(User adminUser) throws IOException {
         // Admin Stats are saved to a seperate file
-        Path adminStatsPath = userCsvPath.getParent().resolve("admin_stats.csv");
+        Path parentDir = userCsvPath.getParent();
+        Path adminStatsPath = (parentDir != null) ?
+            parentDir.resolve("admin_stats.csv") :
+            Paths.get("admin_stats.csv");
+
         try (PrintWriter writer = new PrintWriter(new FileWriter(adminStatsPath.toFile()))) {
             writer.println("downloadStats,uploadStats");
             writer.println(adminUser.getDownloadStats().toCsvString() + "," +
