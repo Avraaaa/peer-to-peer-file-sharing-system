@@ -12,6 +12,7 @@ public class PeerClient {
     private User loggedInUser;
     private int myListenPort;
     private FileHandler fileHandler;
+    private DownloadStrategy downloadStrategy;
     private final Set<String> knownSharedFiles = ConcurrentHashMap.newKeySet();
 
     private Thread downloadListenerThread;
@@ -155,8 +156,9 @@ public class PeerClient {
     private void initializeLocalServices(String sharedDirectoryPath, PrintWriter serverOut) throws IOException {
         this.fileHandler = new LocalFileHandler(sharedDirectoryPath);
         Path sharedDir = ((LocalFileHandler) fileHandler).getSharedDirectory().toAbsolutePath();
+        this.downloadStrategy = new ChunkedDownload(8192, fileHandler, sharedDir);
         System.out.println("File sharing is active for directory: " + sharedDir);
-
+        
         this.downloadListenerSocket = new ServerSocket(myListenPort);
         this.downloadListenerThread = new Thread(new DownloadListener(downloadListenerSocket, fileHandler));
         this.downloadListenerThread.start();
@@ -240,28 +242,17 @@ public class PeerClient {
             System.out.println("Invalid input. Please enter a number.");
         }
     }
-
-    private void downloadFile(String peerAddress, String fileName) {
-        System.out.println("Attempting to download '" + fileName + "' from " + peerAddress + "...");
-        String[] parts = peerAddress.split(":");
-        String host = parts[0];
-        int port = Integer.parseInt(parts[1]);
-
-        try (
-                Socket peerSocket = new Socket(host, port);
-                PrintWriter peerOut = new PrintWriter(peerSocket.getOutputStream(), true);
-                InputStream peerIn = peerSocket.getInputStream();
-                OutputStream fileOut = fileHandler.getOutputStream(fileName)
-        ) {
-            peerOut.println("DOWNLOAD " + fileName);
-            peerIn.transferTo(fileOut);
-            System.out.println("Download complete: " + fileName);
-        } catch (IOException e) {
-            System.err.println("Download failed: " + e.getMessage());
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+    
+private void downloadFile(String peerAddress, String fileName) {
+    System.out.println("Attempting to download '" + fileName + "' from " + peerAddress + "...");
+    try {
+        downloadStrategy.download(peerAddress, fileName);
+        System.out.println("Download complete: " + fileName);
+    } catch (IOException e) {
+        System.err.println("Download failed: " + e.getMessage());
     }
+}
+
 
     private void handleRemoveUser(PrintWriter out, BufferedReader in, Scanner console) throws IOException {
         System.out.print("Enter username to remove: ");
