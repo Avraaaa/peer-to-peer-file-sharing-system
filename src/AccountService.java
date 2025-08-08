@@ -42,13 +42,13 @@ public class AccountService {
             lines = Files.readAllLines(userCsvPath);
             // Skip header or if file is empty
             if (lines.size() <= 1) {
-                users.putIfAbsent("admin", new AdminUser(hashPassword("admin")));
+                users.putIfAbsent("admin", createAdminWithStats());
                 return;
             }
         } catch (IOException e) {
             System.err.println("FATAL Error: Could not read user CSV file at " + userCsvPath + ": " + e.getMessage());
             // Create a default admin if the file is unreadable
-            users.putIfAbsent("admin", new AdminUser(hashPassword("admin")));
+            users.putIfAbsent("admin", createAdminWithStats());
             return;
         }
         for (int i = 1; i < lines.size(); i++) {
@@ -68,7 +68,31 @@ public class AccountService {
                 System.err.println("Warning: Corrupt line in user CSV file, skipping: " + line);
             }
         }
-        users.putIfAbsent("admin", new AdminUser(hashPassword("admin")));
+        users.putIfAbsent("admin", createAdminWithStats());
+    }
+
+    private AdminUser createAdminWithStats() {
+        DownloadStats downloadStats = new DownloadStats();
+        UploadStats uploadStats = new UploadStats();
+
+        // Try to load existing admin stats
+        Path adminStatsPath = userCsvPath.getParent().resolve("admin_stats.csv");
+        if (Files.exists(adminStatsPath)) {
+            try {
+                List<String> lines = Files.readAllLines(adminStatsPath);
+                if (lines.size() > 1) { // Skip header
+                    String[] parts = lines.get(1).split(",");
+                    if (parts.length >= 2) {
+                        downloadStats.fromCsvString(parts[0]);
+                        uploadStats.fromCsvString(parts[1]);
+                    }
+                }
+            } catch (IOException e) {
+                System.err.println("Warning: Could not load admin stats: " + e.getMessage());
+            }
+        }
+
+        return new AdminUser(hashPassword("admin"), downloadStats, uploadStats);
     }
 
     public synchronized User createUser(String username, String password, String sharedDirectory) throws IOException {
@@ -125,22 +149,29 @@ public class AccountService {
         Files.write(tempFilePath, lines);
 
         // Atomic move to prevent data corruption if the program crashes mid-write
+        IOException lastException = null;
 
-        for (int i = 0; i < MAX_RETRIES; i++) {
+        for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             try {
                 Files.move(tempFilePath, userCsvPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-                return;
+                return; // Success
             } catch (IOException e) {
-                if (i == MAX_RETRIES - 1) throw e;
-                System.err.printf("Warning: Failed to rewrite user CSV file, retrying (%d/%d)%n", i + 1, MAX_RETRIES);
+                lastException = e;
+                if (attempt == MAX_RETRIES) {
+                    break;
+                }
+                System.err.printf("Warning: Failed to rewrite user CSV file, retrying (%d/%d)%n", attempt, MAX_RETRIES);
                 try {
-                    Thread.sleep(RETRY_DELAY_MS * (i + 1));
+                    Thread.sleep(RETRY_DELAY_MS * attempt);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     throw new IOException("CSV file write was interrupted", ie);
                 }
             }
         }
+
+        // If we get here, all retries failed
+        throw lastException;
     }
 
     private Path getTempCsvPath() {
@@ -173,5 +204,30 @@ public class AccountService {
 
     private boolean verifyPassword(String password, String storedHash) {
         return hashPassword(password).equals(storedHash);
+    }
+
+    public synchronized void saveUserStats(User user) throws IOException {
+
+        loadUsers();
+        // For admin, we only save stats, not the full user record to CSV
+        users.put(user.getUsername(), user);
+
+        if (user.isAdmin()) {
+            saveAdminStatsToFile(user);
+        } else {
+            // Save regular users to CSV
+            rewriteUserCsvFile();
+        }
+        System.out.println("Saved stats for user: " + user.getUsername());
+    }
+
+    private void saveAdminStatsToFile(User adminUser) throws IOException {
+        // Admin Stats are saved to a seperate file
+        Path adminStatsPath = userCsvPath.getParent().resolve("admin_stats.csv");
+        try (PrintWriter writer = new PrintWriter(new FileWriter(adminStatsPath.toFile()))) {
+            writer.println("downloadStats,uploadStats");
+            writer.println(adminUser.getDownloadStats().toCsvString() + "," +
+                          adminUser.getUploadStats().toCsvString());
+        }
     }
 }

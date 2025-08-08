@@ -141,7 +141,22 @@ public class Server {
                             handleRemoveUser(parts[1], transport);
                             break;
                         case "UNREGISTER":
+
+                            if (loggedInUser != null) {
+                                try {
+                                    accountService.saveUserStats(loggedInUser);
+                                } catch (IOException e) {
+                                    System.err.println("Failed to save stats for user " + loggedInUser.getUsername() + ": " + e.getMessage());
+                                }
+                            }
                             return;
+                        case "UPDATE_STATS":
+                            if (loggedInUser == null) {
+                                transport.sendLine("ERROR Not logged in");
+                                continue;
+                            }
+                            handleUpdateStats(transport);
+                            break;
                         default:
                             transport.sendLine("ERROR Unknown command");
                     }
@@ -279,6 +294,12 @@ public class Server {
                 }
                 System.out.println("Peer unregistered: " + peerInfo.address);
             }
+        }
+
+        private void handleUpdateStats(Transport transport) throws IOException {
+
+            transport.sendLine("UPDATE_STATS_SUCCESS Stats are automatically tracked.");
+            System.out.println("Stats update request received from user '" + loggedInUser.getUsername() + "' (auto-tracking enabled)");
         }
     }
 }

@@ -6,6 +6,10 @@ public class AdminUser extends User {
         super("admin", passwordHash, ADMIN_SHARED_DIR, new DownloadStats(), new UploadStats());
     }
 
+    public AdminUser(String passwordHash, DownloadStats downloadStats, UploadStats uploadStats) {
+        super("admin", passwordHash, ADMIN_SHARED_DIR, downloadStats, uploadStats);
+    }
+
     @Override
     public boolean isAdmin() {
         return true;

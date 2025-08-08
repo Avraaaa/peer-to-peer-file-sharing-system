@@ -57,11 +57,12 @@ public class PeerClient {
                     switch (choice) {
                         case "1": handleSearchAndDownload(serverTransport, console); break;
                         case "2": handleListPeers(serverTransport); break;
-                        case "3":
+                        case "3": handleViewStatistics(); break;
+                        case "4":
                             if (loggedInUser.isAdmin()) handleRemoveUser(serverTransport, console);
                             else handleLogout(serverTransport);
                             break;
-                        case "4":
+                        case "5":
                             if (loggedInUser.isAdmin()) handleLogout(serverTransport);
                             else System.out.println("Invalid option.");
                             break;
@@ -90,11 +91,12 @@ public class PeerClient {
         System.out.printf("\n--- Logged in as %s ---\n", loggedInUser.getUsername());
         System.out.println("[1] Search for a file");
         System.out.println("[2] List online peers");
+        System.out.println("[3] View my statistics");
         if (loggedInUser.isAdmin()) {
-            System.out.println("[3] Remove a user (Admin)");
-            System.out.println("[4] Logout");
+            System.out.println("[4] Remove a user (Admin)");
+            System.out.println("[5] Logout");
         } else {
-            System.out.println("[3] Logout");
+            System.out.println("[4] Logout");
         }
         System.out.print("> ");
     }
@@ -166,7 +168,7 @@ public class PeerClient {
         System.out.println("File sharing is active for directory: " + sharedDir);
 
         this.downloadListenerSocket = new ServerSocket(myListenPort);
-        this.downloadListenerThread = new Thread(new DownloadListener(downloadListenerSocket, fileHandler));
+        this.downloadListenerThread = new Thread(new DownloadListener(downloadListenerSocket, fileHandler, this));
         this.downloadListenerThread.start();
 
         this.directoryWatcherThread = new Thread(new DirectoryWatcher(sharedDir, serverTransport));
@@ -256,11 +258,33 @@ public class PeerClient {
     private void downloadFile(String peerAddress, String fileName) {
         System.out.println("Attempting to download '" + fileName + "' from " + peerAddress + "...");
         try {
+            long fileSizeBefore = getFileSize(fileName);
             downloadStrategy.download(peerAddress, fileName);
-            System.out.println("Download complete: " + fileName);
+            long fileSizeAfter = getFileSize(fileName);
+
+            // Update download stats
+            if (fileSizeAfter > fileSizeBefore) {
+                loggedInUser.getDownloadStats().addFile();
+                loggedInUser.getDownloadStats().addBytes(fileSizeAfter - fileSizeBefore);
+                System.out.println("Download complete: " + fileName + " (" + (fileSizeAfter - fileSizeBefore) + " bytes)");
+            } else {
+                System.out.println("Download complete: " + fileName);
+            }
         } catch (IOException e) {
             System.err.println("Download failed: " + e.getMessage());
         }
+    }
+
+    private long getFileSize(String fileName) {
+        try {
+            if (fileHandler.fileExists(fileName)) {
+                Path filePath = ((LocalFileHandler) fileHandler).getSharedDirectory().resolve(fileName);
+                return Files.size(filePath);
+            }
+        } catch (IOException e) {
+            // Ignore
+        }
+        return 0;
     }
 
 
@@ -272,13 +296,24 @@ public class PeerClient {
         System.out.println("Server response: " + response);
     }
 
+    private void handleViewStatistics() {
+        System.out.println("\n--- Your Statistics ---");
+        System.out.println("Downloaded files: " + loggedInUser.getDownloadStats().getFileCount());
+        System.out.println("Downloaded bytes: " + loggedInUser.getDownloadStats().getTotalBytes());
+        System.out.println("Uploaded files: " + loggedInUser.getUploadStats().getFileCount());
+        System.out.println("Uploaded bytes: " + loggedInUser.getUploadStats().getTotalBytes());
+        System.out.println("-------------------------");
+    }
+
     private static class DownloadListener implements Runnable {
         private final ServerSocket listenerSocket;
         private final FileHandler fileHandler;
+        private final PeerClient peerClient;
 
-        public DownloadListener(ServerSocket socket, FileHandler fileHandler) {
+        public DownloadListener(ServerSocket socket, FileHandler fileHandler, PeerClient peerClient) {
             this.listenerSocket = socket;
             this.fileHandler = fileHandler;
+            this.peerClient = peerClient;
         }
 
         @Override
@@ -304,12 +339,20 @@ public class PeerClient {
                 if (request != null && request.startsWith("DOWNLOAD ")) {
                     String fileName = request.substring(9);
                     if (fileHandler.fileExists(fileName)) {
+                        long fileSize = 0;
                         try (InputStream fileIn = fileHandler.getInputStream(fileName)) {
                             //Sending the stuff in 8KB chunks
                             byte[] buffer = new byte[8192];
                             int bytesRead;
                             while ((bytesRead = fileIn.read(buffer)) != -1) {
                                 transport.sendBytes(buffer, bytesRead);
+                                fileSize += bytesRead;
+                            }
+                            if (peerClient.loggedInUser != null && fileSize > 0) {
+                                peerClient.loggedInUser.getUploadStats().addFile();
+                                peerClient.loggedInUser.getUploadStats().addBytes(fileSize);
+                                System.out.println("\n[Upload] Sent " + fileName + " (" + fileSize + " bytes)");
+                                System.out.print("> ");
                             }
                         }
                     }
