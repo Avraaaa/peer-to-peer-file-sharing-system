@@ -76,7 +76,7 @@ public class Server {
 
             try (Transport transport = new TCPTransport(socket)) {
                 String command;
-                while ((command = transport.readline()) != null) {
+                while ((command = transport.readLine()) != null) {
                     if (loggedInUser != null) {
                         clientIdentifier = loggedInUser.getUsername();
                     }

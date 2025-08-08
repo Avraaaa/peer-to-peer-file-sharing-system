@@ -108,7 +108,7 @@ public class PeerClient {
         this.myListenPort = Integer.parseInt(console.nextLine());
 
         serverTransport.sendLine("LOGIN " + username + " " + password);
-        String response = serverTransport.readline();
+        String response = serverTransport.readLine();
 
         if (response != null && response.startsWith("LOGIN_SUCCESS")) {
             String[] parts = response.split(" ", 2);
@@ -143,7 +143,7 @@ public class PeerClient {
         String sharedDirectoryPath = console.nextLine();
 
         serverTransport.sendLine("SIGNUP " + username + " " + password + " " + sharedDirectoryPath);
-        String response = serverTransport.readline();
+        String response = serverTransport.readLine();
         if (response != null && response.startsWith("SIGNUP_SUCCESS")) {
             System.out.println("Signup successful! You can now log in.");
         } else {
@@ -210,7 +210,7 @@ public class PeerClient {
 
     private void handleListPeers(Transport serverTransport) throws IOException {
         serverTransport.sendLine("LIST_PEERS");
-        String response = serverTransport.readline();
+        String response = serverTransport.readLine();
         System.out.println("\n--- Online Peers ---");
         if (response == null || response.isEmpty()) {
             System.out.println("No other peers are online.");
@@ -224,7 +224,7 @@ public class PeerClient {
         System.out.print("Enter filename to search for: ");
         String fileName = console.nextLine();
         serverTransport.sendLine("SEARCH " + fileName);
-        String response = serverTransport.readline();
+        String response = serverTransport.readLine();
 
         if (response == null || response.isEmpty()) {
             System.out.println("File '" + fileName + "' not found on any peer.");
@@ -268,7 +268,7 @@ public class PeerClient {
         System.out.print("Enter username to remove: ");
         String userToRemove = console.nextLine();
         serverTransport.sendLine("REMOVE_USER " + userToRemove);
-        String response = serverTransport.readline();
+        String response = serverTransport.readLine();
         System.out.println("Server response: " + response);
     }
 
@@ -300,7 +300,7 @@ public class PeerClient {
 
         private void handleDownloadRequest(Socket peerConnection) {
             try (Transport transport = new TCPTransport(peerConnection)) {
-                String request = transport.readline();
+                String request = transport.readLine();
                 if (request != null && request.startsWith("DOWNLOAD ")) {
                     String fileName = request.substring(9);
                     if (fileHandler.fileExists(fileName)) {

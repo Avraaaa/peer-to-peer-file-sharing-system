@@ -22,11 +22,11 @@ public class TCPTransport implements Transport {
     }
 
     @Override
-    public void sendLine(String line) throws IOException{
+    public void sendLine(String line) {
         out.println(line);
     }
 
-    public String readline() throws IOException {
+    public String readLine() throws IOException {
         return in.readLine();
     }
 

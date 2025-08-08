@@ -23,7 +23,7 @@ public class AccountService {
         try {
             if (!Files.exists(this.userCsvPath)) {
                 try (PrintWriter writer = new PrintWriter(new FileWriter(this.userCsvPath.toFile()))) {
-                    writer.println("username,passwordHash,sharedDirectory");
+                    writer.println("username,passwordHash,sharedDirectory,downloadStats,uploadStats");
                 } catch (IOException e) {
                     throw new RuntimeException("Failed to create user CSV file at " + this.userCsvPath + ": " + e.getMessage(), e);
                 }
@@ -53,9 +53,16 @@ public class AccountService {
         }
         for (int i = 1; i < lines.size(); i++) {
             String line = lines.get(i);
-            String[] parts = line.split(",", 3);
-            if (parts.length == 3) {
+            String[] parts = line.split(",", 5);
+            if (parts.length >= 3) {
                 User user = new RegularUser(parts[0], parts[1], parts[2]);
+                // Load stats if present
+                if (parts.length >= 4 && !parts[3].isEmpty()) {
+                    user.getDownloadStats().fromCsvString(parts[3]);
+                }
+                if (parts.length >= 5 && !parts[4].isEmpty()) {
+                    user.getUploadStats().fromCsvString(parts[4]);
+                }
                 users.put(user.getUsername(), user);
             } else {
                 System.err.println("Warning: Corrupt line in user CSV file, skipping: " + line);
@@ -103,10 +110,16 @@ public class AccountService {
     private void rewriteUserCsvFile() throws IOException {
         Path tempFilePath = getTempCsvPath();
         List<String> lines = new ArrayList<>();
-        lines.add("username,passwordHash,sharedDirectory");
+        lines.add("username,passwordHash,sharedDirectory,downloadStats,uploadStats");
         for (User user : users.values()) {
             if (!user.isAdmin()) {
-                lines.add(String.join(",", user.getUsername(), user.getPasswordHash(), user.getSharedDirectory()));
+                lines.add(String.join(",",
+                    user.getUsername(),
+                    user.getPasswordHash(),
+                    user.getSharedDirectory(),
+                    user.getDownloadStats().toCsvString(),
+                    user.getUploadStats().toCsvString()
+                ));
             }
         }
         Files.write(tempFilePath, lines);
