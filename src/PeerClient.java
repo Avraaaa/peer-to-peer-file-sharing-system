@@ -221,24 +221,27 @@ public class PeerClient {
         shareInitialFiles(serverTransport);
     }
 
-    private void shareInitialFiles(Transport serverTransport) {
-        System.out.println("Sharing initial files...");
-        List<String> files = fileHandler.listSharedFiles();
-        if (files.isEmpty()) {
-            System.out.println("... No files found to share.");
-        } else {
-            for (String fileName : files) {
-                if (knownSharedFiles.add(fileName)) {
-                    System.out.println("... sharing " + fileName);
-                    try {
-                        serverTransport.sendLine("SHARE " + fileName);
-                    } catch (IOException e) {
-                        System.err.println("Failed to share file " + fileName + ": " + e.getMessage());
-                    }
+   private void shareInitialFiles(Transport serverTransport) {
+    System.out.println("Sharing initial files...");
+    List<SharedFile> sharedFiles = ((LocalFileHandler) fileHandler).listSharedFileObjects();
+
+    if (sharedFiles.isEmpty()) {
+        System.out.println("... No files found to share.");
+    } else {
+        for (SharedFile sf : sharedFiles) {
+            String fileName = sf.getName();
+            if (knownSharedFiles.add(fileName)) {
+                System.out.println("... sharing " + sf.getFileInfo());
+                try {
+                    serverTransport.sendLine("SHARE " + fileName);
+                } catch (IOException e) {
+                    System.err.println("Failed to share file " + fileName + ": " + e.getMessage());
                 }
             }
         }
     }
+}
+
 
     private void shutdownLocalServices() {
         if (directoryWatcherThread != null && directoryWatcherThread.isAlive()) {
@@ -446,43 +449,43 @@ public class PeerClient {
         }
     }
 
+private class DirectoryWatcher implements Runnable {
+    private final Path path;
+    private final Transport serverTransport;
+    private static final int POLLING_INTERVAL_MS = 3000;
 
-    private class DirectoryWatcher implements Runnable {
-        private final Path path;
-        private final Transport serverTransport;
-        private static final int POLLING_INTERVAL_MS = 3000;
+    DirectoryWatcher(Path path, Transport serverTransport) {
+        this.path = path;
+        this.serverTransport = serverTransport;
+    }
 
-        DirectoryWatcher(Path path, Transport serverTransport) {
-            this.path = path;
-            this.serverTransport = serverTransport;
-        }
+    @Override
+    public void run() {
+        System.out.println("Directory watcher started for: " + path + " (polling every 3 seconds)");
 
-        @Override
-        public void run() {
-            System.out.println("Directory watcher started for: " + path + " (polling every 3 seconds)");
+        try {
+            while (!Thread.currentThread().isInterrupted()) {
+                List<SharedFile> currentFilesOnDisk = ((LocalFileHandler) fileHandler).listSharedFileObjects();
 
-            try {
-                while (!Thread.currentThread().isInterrupted()) {
-                    List<String> currentFilesOnDisk = fileHandler.listSharedFiles();
-
-                    for (String fileName : currentFilesOnDisk) {
-                        if (knownSharedFiles.add(fileName)) {
-                            System.out.println("\n[Auto-Detector] New file found: " + fileName + ". Sharing with network...");
-                            try {
-                                serverTransport.sendLine("SHARE " + fileName);
-                            } catch (IOException e) {
-                                System.err.println("Failed to auto-share file " + fileName + ": " + e.getMessage());
-                            }
-                            System.out.print("> ");
+                for (SharedFile sf : currentFilesOnDisk) {
+                    String fileName = sf.getName();
+                    if (knownSharedFiles.add(fileName)) {
+                        System.out.println("\n[Auto-Detector] New file found: " + sf.getFileInfo() + ". Sharing with network...");
+                        try {
+                            serverTransport.sendLine("SHARE " + fileName);
+                        } catch (IOException e) {
+                            System.err.println("Failed to auto-share file " + fileName + ": " + e.getMessage());
                         }
+                        System.out.print("> ");
                     }
-
-                    Thread.sleep(POLLING_INTERVAL_MS);
                 }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            } finally {
-                System.out.println("Directory watcher stopped.");
+
+                Thread.sleep(POLLING_INTERVAL_MS);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            System.out.println("Directory watcher stopped.");
             }
         }
     }
