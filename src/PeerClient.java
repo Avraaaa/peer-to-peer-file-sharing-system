@@ -3,6 +3,7 @@ import java.net.*;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.zip.ZipFile;
 
 public class PeerClient {
 
@@ -16,14 +17,18 @@ public class PeerClient {
     private static final int MAX_PORT = 10000;
 
     private User loggedInUser;
-    private int myListenPort;
+    private int myListenPort; // This is the TCP port
     private FileHandler fileHandler;
     private DownloadStrategy downloadStrategy;
+
     private final Set<String> knownSharedFiles = ConcurrentHashMap.newKeySet();
 
-    private Thread downloadListenerThread;
+    private Thread downloadListenerThread; // For TCP downloads
     private ServerSocket downloadListenerSocket;
     private Thread directoryWatcherThread;
+    private Thread udpListenerThread; // For UDP requests
+    private UDPRequestHandler udpRequestHandler;
+
 
     public PeerClient(String serverHost, int serverPort) {
         this.serverHost = serverHost;
@@ -33,8 +38,10 @@ public class PeerClient {
 
     private int allocateAvailablePort() {
         for (int port = MIN_PORT; port <= MAX_PORT; port++) {
-            try (ServerSocket testSocket = new ServerSocket(port)) {
-                System.out.println("Allocated port: " + port);
+            try (ServerSocket testSocket = new ServerSocket(port);
+                 DatagramSocket testUdpSocket = new DatagramSocket(port + 1)) {
+                System.out.println("Allocated TCP port: " + port);
+                System.out.println("Allocated UDP port: " + (port + 1));
                 return port;
             } catch (IOException e) {
                 // Port is in use :((
@@ -77,14 +84,21 @@ public class PeerClient {
                     switch (choice) {
                         case "1": handleSearchAndDownload(serverTransport, console); break;
                         case "2": handleListPeers(serverTransport); break;
-                        case "3": handleViewStatistics(); break;
-                        case "4":
-                            if (loggedInUser.isAdmin()) handleRemoveUser(serverTransport, console);
-                            else handleLogout(serverTransport);
-                            break;
+                        case "3": handleBrowsePeerFiles(serverTransport, console); break;
+                        case "4": handleViewStatistics(); break;
                         case "5":
-                            if (loggedInUser.isAdmin()) handleLogout(serverTransport);
-                            else System.out.println("Invalid option.");
+                            if (loggedInUser.isAdmin()) {
+                                handleRemoveUser(serverTransport, console);
+                            } else {
+                                handleLogout(serverTransport);
+                            }
+                            break;
+                        case "6":
+                            if (loggedInUser.isAdmin()) {
+                                handleLogout(serverTransport);
+                            } else {
+                                System.out.println("Invalid option. Please try again.");
+                            }
                             break;
                         default: System.out.println("Invalid option. Please try again.");
                     }
@@ -111,12 +125,13 @@ public class PeerClient {
         System.out.printf("\n--- Logged in as %s ---\n", loggedInUser.getUsername());
         System.out.println("[1] Search for a file");
         System.out.println("[2] List online peers");
-        System.out.println("[3] View my statistics");
+        System.out.println("[3] Browse a peer's files");
+        System.out.println("[4] View my statistics");
         if (loggedInUser.isAdmin()) {
-            System.out.println("[4] Remove a user (Admin)");
-            System.out.println("[5] Logout");
+            System.out.println("[5] Remove a user (Admin)");
+            System.out.println("[6] Logout");
         } else {
-            System.out.println("[4] Logout");
+            System.out.println("[5] Logout");
         }
         System.out.print("> ");
     }
@@ -141,7 +156,7 @@ public class PeerClient {
             String[] parts = response.split(" ", 2);
             String[] payload = parts[1].split(";", 5);
 
-            // Create appropriate User instance based on admin status
+            //Create user type based on whether its  admin or not
             String receivedUsername = payload[0];
             boolean isAdmin = Boolean.parseBoolean(payload[1]);
             String sharedDirFromServer = payload[2];
@@ -210,9 +225,17 @@ public class PeerClient {
         this.downloadStrategy = new ChunkedDownload(8192, fileHandler, sharedDir);
         System.out.println("File sharing is active for directory: " + sharedDir);
 
+        // TCP for actual dls
         this.downloadListenerSocket = new ServerSocket(myListenPort);
         this.downloadListenerThread = new Thread(new DownloadListener(downloadListenerSocket, fileHandler, this, serverTransport));
         this.downloadListenerThread.start();
+
+        // UDP for metadata
+        int udpPort = myListenPort + 1;
+        this.udpRequestHandler = new UDPRequestHandler(udpPort, this.fileHandler);
+        this.udpListenerThread = new Thread(this.udpRequestHandler);
+        this.udpListenerThread.start();
+
 
         this.directoryWatcherThread = new Thread(new DirectoryWatcher(sharedDir, serverTransport));
         this.directoryWatcherThread.start();
@@ -221,37 +244,45 @@ public class PeerClient {
         shareInitialFiles(serverTransport);
     }
 
-   private void shareInitialFiles(Transport serverTransport) {
-    System.out.println("Sharing initial files...");
-    List<SharedFile> sharedFiles = ((LocalFileHandler) fileHandler).listSharedFileObjects();
+    private void shareInitialFiles(Transport serverTransport) {
+        System.out.println("Sharing initial files...");
+        List<SharedFile> sharedFiles = ((LocalFileHandler) fileHandler).listSharedFileObjects();
 
-    if (sharedFiles.isEmpty()) {
-        System.out.println("... No files found to share.");
-    } else {
-        for (SharedFile sf : sharedFiles) {
-            String fileName = sf.getName();
-            if (knownSharedFiles.add(fileName)) {
-                System.out.println("... sharing " + sf.getFileInfo());
-                try {
-                    serverTransport.sendLine("SHARE " + fileName);
-                } catch (IOException e) {
-                    System.err.println("Failed to share file " + fileName + ": " + e.getMessage());
+        if (sharedFiles.isEmpty()) {
+            System.out.println("... No files found to share.");
+        } else {
+            for (SharedFile sf : sharedFiles) {
+                String fileName = sf.getName();
+                if (knownSharedFiles.add(fileName)) {
+                    System.out.println("... sharing " + sf.getFileInfo());
+                    try {
+                        serverTransport.sendLine("SHARE " + fileName);
+                    } catch (IOException e) {
+                        System.err.println("Failed to share file " + fileName + ": " + e.getMessage());
+                    }
                 }
             }
         }
     }
-}
 
 
     private void shutdownLocalServices() {
         if (directoryWatcherThread != null && directoryWatcherThread.isAlive()) {
             directoryWatcherThread.interrupt();
         }
+        // Shutdown TCP
         if (downloadListenerSocket != null && !downloadListenerSocket.isClosed()) {
             try { downloadListenerSocket.close(); } catch (IOException e) { /* ignore */ }
         }
         if (downloadListenerThread != null && downloadListenerThread.isAlive()) {
             downloadListenerThread.interrupt();
+        }
+        // Shutdown UDP
+        if (udpRequestHandler != null) {
+            udpRequestHandler.stop();
+        }
+        if (udpListenerThread != null && udpListenerThread.isAlive()) {
+            udpListenerThread.interrupt();
         }
         System.out.println("Local services shut down.");
     }
@@ -272,9 +303,109 @@ public class PeerClient {
         System.out.println("--------------------");
     }
 
+    private void handleBrowsePeerFiles(Transport serverTransport, Scanner console) throws IOException {
+        // 1. Get and display peers from the server
+        serverTransport.sendLine("LIST_PEERS");
+        String response = serverTransport.readLine();
+        System.out.println("\n--- Online Peers ---");
+        if (response == null || response.isEmpty()) {
+            System.out.println("No other peers are online to browse.");
+            return;
+        }
+
+        List<String> peers = new ArrayList<>(Arrays.asList(response.split(",")));
+        List<String> otherPeers = new ArrayList<>();
+
+        // Filter out the current user from the list
+        for (String peer : peers) {
+            try {
+                int peerPort = Integer.parseInt(peer.split(":")[1]);
+                if (peerPort != this.myListenPort) {
+                    otherPeers.add(peer);
+                }
+            } catch (NumberFormatException | ArrayIndexOutOfBoundsException e) { /* ignore malformed peer strings */ }
+        }
+
+        if (otherPeers.isEmpty()) {
+            System.out.println("No *other* peers are online to browse.");
+            return;
+        }
+
+        for (int i = 0; i < otherPeers.size(); i++) {
+            System.out.printf("[%d] %s\n", i + 1, otherPeers.get(i));
+        }
+        System.out.println("--------------------");
+        System.out.print("Choose a peer to browse (enter number, or 0 to cancel): ");
+
+        try {
+            int choice = Integer.parseInt(console.nextLine());
+            if (choice <= 0 || choice > otherPeers.size()) {
+                System.out.println("Browse cancelled.");
+                return;
+            }
+
+            String peerAddress = otherPeers.get(choice - 1);
+            System.out.println("\nFetching file list from " + peerAddress + "...");
+
+            // 2. Get file list directly from the peer using UDP
+            String fileListResponse = getFileListFromPeer(peerAddress);
+            if (fileListResponse == null || fileListResponse.isEmpty() || fileListResponse.startsWith("Error:")) {
+                System.out.println("Could not retrieve file list from peer. They might be offline or an error occurred.");
+                return;
+            }
+
+            List<String> files = Arrays.asList(fileListResponse.split(","));
+            if (files.isEmpty() || (files.size() == 1 && files.get(0).isEmpty())) {
+                System.out.println("Peer " + peerAddress + " is not sharing any files.");
+                return;
+            }
+
+            System.out.println("\n--- Files on " + peerAddress + " ---");
+            for (int i = 0; i < files.size(); i++) {
+                System.out.printf("[%d] %s\n", i + 1, files.get(i));
+            }
+            System.out.println("---------------------------------");
+
+            // 3. Loop to allow user to query details for specific files
+            while (true) {
+                System.out.print("Enter a file number for details (e.g., size), or 0 to go back: ");
+                int fileChoice = Integer.parseInt(console.nextLine());
+                if (fileChoice <= 0 || fileChoice > files.size()) {
+                    break; // Exit the detail query loop
+                }
+
+                String fileName = files.get(fileChoice - 1);
+                System.out.println("Querying details for '" + fileName + "'...");
+
+                // 4. Get file size via UDP
+                long fileSize = getPeerFileSize(peerAddress, fileName);
+                if (fileSize != -1) {
+                    System.out.println("  - Size: " + formatFileSize(fileSize));
+                } else {
+                    System.out.println("  - Could not retrieve file size.");
+                }
+
+                // 5. If it's a zip file, get entry count via UDP
+                if (fileName.toLowerCase().endsWith(".zip")) {
+                    int zipCount = getRemoteZipFileCount(peerAddress, fileName);
+                    if (zipCount != -1) {
+                        System.out.println("  - Archive contains: " + zipCount + " files/folders");
+                    } else {
+                        System.out.println("  - Could not retrieve zip file details.");
+                    }
+                }
+            }
+
+        } catch (NumberFormatException e) {
+            System.out.println("Invalid input. Please enter a number.");
+        }
+    }
+
+
     private void handleSearchAndDownload(Transport serverTransport, Scanner console) throws IOException {
         System.out.print("Enter filename to search for: ");
         String fileName = console.nextLine();
+
         serverTransport.sendLine("SEARCH " + fileName);
         String response = serverTransport.readLine();
 
@@ -358,6 +489,7 @@ public class PeerClient {
     }
 
     private String formatFileSize(long bytes) {
+        if (bytes < 0) return "N/A";
         if (bytes == 0) return "0 B";
 
         String[] units = {"B", "KB", "MB", "GB", "TB"};
@@ -379,13 +511,71 @@ public class PeerClient {
     private void sendStatsToServer(Transport serverTransport) {
         try {
             String statsData = loggedInUser.getDownloadStats().toCsvString() + ";" +
-                              loggedInUser.getUploadStats().toCsvString();
+                    loggedInUser.getUploadStats().toCsvString();
             serverTransport.sendLine("UPDATE_STATS " + statsData);
-            String response = serverTransport.readLine();
         } catch (IOException e) {
             System.err.println("Failed to send stats to server: " + e.getMessage());
         }
     }
+
+
+    private String getFileListFromPeer(String peerAddress) {
+        try {
+            String[] parts = peerAddress.split(":");
+            String host = parts[0];
+            int tcpPort = Integer.parseInt(parts[1]);
+            int udpPort = tcpPort + 1; // Convention: UDP is on TCP port + 1
+
+            try (UDPTransport transport = new UDPTransport(host, udpPort)) {
+                transport.setSoTimeout(3000); // 3-second timeout
+                transport.sendLine("LIST_FILES");
+                return transport.readLine();
+            }
+        } catch (IOException e) {
+            System.err.println("Failed to get file list from " + peerAddress + " via UDP: " + e.getMessage());
+            return "Error: " + e.getMessage();
+        }
+    }
+
+    private long getPeerFileSize(String peerAddress, String fileName) {
+        try {
+            String[] parts = peerAddress.split(":");
+            String host = parts[0];
+            int tcpPort = Integer.parseInt(parts[1]);
+            int udpPort = tcpPort + 1;
+
+            try (UDPTransport transport = new UDPTransport(host, udpPort)) {
+                transport.setSoTimeout(3000);
+                transport.sendLine("FILESIZE " + fileName);
+                String response = transport.readLine();
+                return Long.parseLong(response);
+            }
+        } catch (IOException | NumberFormatException e) {
+            System.err.println("Failed to get file size for '" + fileName + "' from " + peerAddress + " via UDP: " + e.getMessage());
+            return -1; // Return -1 on error
+        }
+    }
+
+    private int getRemoteZipFileCount(String peerAddress, String fileName) {
+        try {
+            String[] parts = peerAddress.split(":");
+            String host = parts[0];
+            int tcpPort = Integer.parseInt(parts[1]);
+            int udpPort = tcpPort + 1;
+
+            try (UDPTransport transport = new UDPTransport(host, udpPort)) {
+                transport.setSoTimeout(3000);
+                transport.sendLine("GET_ZIP_COUNT " + fileName);
+                String response = transport.readLine();
+                return Integer.parseInt(response);
+            }
+        } catch (IOException | NumberFormatException e) {
+            System.err.println("Failed to get zip count for '" + fileName + "' from " + peerAddress + " via UDP: " + e.getMessage());
+            return -1; // Return -1 on error
+        }
+    }
+
+
 
     private static class DownloadListener implements Runnable {
         private final ServerSocket listenerSocket;
@@ -402,7 +592,7 @@ public class PeerClient {
 
         @Override
         public void run() {
-            System.out.println("Download listener started on port " + listenerSocket.getLocalPort());
+            System.out.println("TCP Download listener started on port " + listenerSocket.getLocalPort());
             while (!Thread.currentThread().isInterrupted() && !listenerSocket.isClosed()) {
                 try {
                     Socket peerConnection = listenerSocket.accept();
@@ -449,43 +639,119 @@ public class PeerClient {
         }
     }
 
-private class DirectoryWatcher implements Runnable {
-    private final Path path;
-    private final Transport serverTransport;
-    private static final int POLLING_INTERVAL_MS = 3000;
+    private class UDPRequestHandler implements Runnable {
+        private final DatagramSocket socket;
+        private final FileHandler fileHandler;
+        private volatile boolean running = true;
 
-    DirectoryWatcher(Path path, Transport serverTransport) {
-        this.path = path;
-        this.serverTransport = serverTransport;
-    }
+        public UDPRequestHandler(int port, FileHandler fileHandler) throws IOException {
+            this.socket = new DatagramSocket(port);
+            this.fileHandler = fileHandler;
+        }
 
-    @Override
-    public void run() {
-        System.out.println("Directory watcher started for: " + path + " (polling every 3 seconds)");
+        public void stop() {
+            running = false;
+            socket.close();
+        }
 
-        try {
-            while (!Thread.currentThread().isInterrupted()) {
-                List<SharedFile> currentFilesOnDisk = ((LocalFileHandler) fileHandler).listSharedFileObjects();
+        @Override
+        public void run() {
+            System.out.println("UDP Request Handler started on port " + socket.getLocalPort());
+            while (running) {
+                try {
+                    byte[] buffer = new byte[1024];
+                    DatagramPacket requestPacket = new DatagramPacket(buffer, buffer.length);
+                    socket.receive(requestPacket);
 
-                for (SharedFile sf : currentFilesOnDisk) {
-                    String fileName = sf.getName();
-                    if (knownSharedFiles.add(fileName)) {
-                        System.out.println("\n[Auto-Detector] New file found: " + sf.getFileInfo() + ". Sharing with network...");
-                        try {
-                            serverTransport.sendLine("SHARE " + fileName);
-                        } catch (IOException e) {
-                            System.err.println("Failed to auto-share file " + fileName + ": " + e.getMessage());
-                        }
-                        System.out.print("> ");
+                    String requestString = new String(requestPacket.getData(), 0, requestPacket.getLength());
+                    InetAddress clientAddress = requestPacket.getAddress();
+                    int clientPort = requestPacket.getPort();
+
+                    String responseString = processRequest(requestString);
+
+                    byte[] responseBytes = responseString.getBytes();
+                    DatagramPacket responsePacket = new DatagramPacket(responseBytes, responseBytes.length, clientAddress, clientPort);
+                    socket.send(responsePacket);
+
+                } catch (IOException e) {
+                    if (running) {
+                        System.err.println("Error in UDP Request Handler: " + e.getMessage());
+                    } else {
+                        System.out.println("UDP Request Handler shutting down.");
                     }
                 }
-
-                Thread.sleep(POLLING_INTERVAL_MS);
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        } finally {
-            System.out.println("Directory watcher stopped.");
+        }
+
+        private String processRequest(String request) {
+            if (request.equals("LIST_FILES")) {
+                return String.join(",", fileHandler.listSharedFiles());
+            } else if (request.startsWith("FILESIZE ")) {
+                String fileName = request.substring(9);
+                if (fileHandler.fileExists(fileName)) {
+                    try {
+                        Path filePath = ((LocalFileHandler) fileHandler).getSharedDirectory().resolve(fileName);
+                        return String.valueOf(Files.size(filePath));
+                    } catch (IOException e) {
+                        return "-1";
+                    }
+                }
+                return "-1";
+            } else if (request.startsWith("GET_ZIP_COUNT ")) {
+                String fileName = request.substring(14);
+                if (fileName.toLowerCase().endsWith(".zip") && fileHandler.fileExists(fileName)) {
+                    try {
+                        File file = ((LocalFileHandler) fileHandler).getSharedDirectory().resolve(fileName).toFile();
+                        try (ZipFile zipFile = new ZipFile(file)) {
+                            return String.valueOf(zipFile.size());
+                        }
+                    } catch (IOException e) {
+                        return "-1"; // Corrupt or unreadable zip
+                    }
+                }
+                return "-1"; // Not a zip or doesn't exist
+            }
+            return "ERROR: Unknown command";
+        }
+    }
+
+    private class DirectoryWatcher implements Runnable {
+        private final Path path;
+        private final Transport serverTransport;
+        private static final int POLLING_INTERVAL_MS = 3000;
+
+        DirectoryWatcher(Path path, Transport serverTransport) {
+            this.path = path;
+            this.serverTransport = serverTransport;
+        }
+
+        @Override
+        public void run() {
+            System.out.println("Directory watcher started for: " + path + " (polling every 3 seconds)");
+
+            try {
+                while (!Thread.currentThread().isInterrupted()) {
+                    List<SharedFile> currentFilesOnDisk = ((LocalFileHandler) fileHandler).listSharedFileObjects();
+
+                    for (SharedFile sf : currentFilesOnDisk) {
+                        String fileName = sf.getName();
+                        if (knownSharedFiles.add(fileName)) {
+                            System.out.println("\n[Auto-Detector] New file found: " + sf.getFileInfo() + ". Sharing with network...");
+                            try {
+                                serverTransport.sendLine("SHARE " + fileName);
+                            } catch (IOException e) {
+                                System.err.println("Failed to auto-share file " + fileName + ": " + e.getMessage());
+                            }
+                            System.out.print("> ");
+                        }
+                    }
+
+                    Thread.sleep(POLLING_INTERVAL_MS);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                System.out.println("Directory watcher stopped.");
             }
         }
     }

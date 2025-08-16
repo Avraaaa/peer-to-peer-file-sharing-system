@@ -51,7 +51,7 @@ public class SharedFileFactory {
             case "zip": case "rar": case "7z": case "tar": case "gz":
                 return new ArchivedFile(fileName, fileSize, 0);
             default:
-                return new VersionedFile(fileName, fileSize);
+                return new GenericFile(fileName, fileSize);
         }
     }
 
