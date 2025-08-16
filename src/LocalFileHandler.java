@@ -31,6 +31,26 @@ public class LocalFileHandler implements FileHandler {
         return fileNames;
     }
 
+    /**
+     lists shared files as SharedFile objects
+     */
+    public List<SharedFile> listSharedFileObjects() {
+        List<SharedFile> sharedFiles = new ArrayList<>();
+
+        try {
+            DirectoryStream<Path> files = Files.newDirectoryStream(sharedDirectory);
+            for (Path p : files) {
+                if (Files.isRegularFile(p)) {
+                    SharedFile sf = SharedFileFactory.createSharedFile(p);
+                    sharedFiles.add(sf);
+                }
+            }
+        } catch (IOException e) {
+            // return empty list if there's an error
+        }
+
+        return sharedFiles;
+    }
 
     @Override
     public OutputStream getOutputStream(String fileName) throws IOException {
@@ -69,7 +89,6 @@ public class LocalFileHandler implements FileHandler {
         return buffer;
     }
 
-
     @Override
     public void saveFileChunk(String fileName, byte[] data, int length) throws IOException {
         Path path = sharedDirectory.resolve(fileName);
@@ -80,7 +99,6 @@ public class LocalFileHandler implements FileHandler {
         out.write(data, 0, length);
         out.close();
     }
-
 
     public Path getSharedDirectory() {
         return sharedDirectory;
