@@ -1,9 +1,12 @@
 import java.io.*;
 import java.net.*;
-import java.nio.file.Path;
-import java.util.*;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class Server {
 
@@ -12,6 +15,8 @@ public class Server {
     private static final List<FileEntry> fileRegistry = new ArrayList<>();
     private static final List<PeerInfo> activePeers = new ArrayList<>();
     private static final AccountService accountService = new AccountService(OUTPUT_DIRECTORY + "/users.csv");
+
+    private static final Map<String, ClientHandler> activeClients = new ConcurrentHashMap<>();
 
     public static void main(String[] args) throws IOException {
         Files.createDirectories(Paths.get(OUTPUT_DIRECTORY));
@@ -73,6 +78,18 @@ public class Server {
         public ClientHandler(Socket socket) {
             this.socket = socket;
         }
+
+        // Forcibly close client's socket
+        public void stopClient() {
+            try {
+                if (socket != null && !socket.isClosed()) {
+                    socket.close();
+                }
+            } catch (IOException e) {
+                System.err.println("Error closing socket for " + (loggedInUser != null ? loggedInUser.getUsername() : "a client") + ": " + e.getMessage());
+            }
+        }
+
 
         @Override
         public void run() {
@@ -166,11 +183,16 @@ public class Server {
                     }
                 }
             } catch (IOException e) {
-                System.err.println("Connection error with " + clientIdentifier + ": " + e.getMessage());
+                // Ignore "Socket closed" errors which are expected when kicking a user
+                if (!"Socket closed".equals(e.getMessage())) {
+                    System.err.println("Connection error with " + clientIdentifier + ": " + e.getMessage());
+                }
             } finally {
                 unregisterPeer();
                 try {
-                    socket.close();
+                    if (!socket.isClosed()) {
+                        socket.close();
+                    }
                 } catch (IOException e) {
                     // Ignore
                 }
@@ -190,6 +212,9 @@ public class Server {
                 );
                 transport.sendLine("LOGIN_SUCCESS " + payload);
                 System.out.println("User '" + username + "' logged in successfully.");
+
+                activeClients.put(username, this);
+
             } else {
                 transport.sendLine("LOGIN_FAIL Invalid username or password.");
                 System.out.println("Failed login attempt for user '" + username + "'.");
@@ -274,6 +299,14 @@ public class Server {
         }
 
         private void handleRemoveUser(String username, Transport transport) throws IOException {
+            // Forcibly disconnect the user if they are currently online
+            ClientHandler handlerToKick = activeClients.get(username);
+            if (handlerToKick != null) {
+                System.out.println("Kicking user '" + username + "'...");
+                handlerToKick.stopClient();
+                activeClients.remove(username); // Also remove from tracking map
+            }
+
             try {
                 if (accountService.removeUser(username)) {
                     transport.sendLine("REMOVE_SUCCESS " + username + " removed.");
@@ -298,6 +331,10 @@ public class Server {
                     }
                 }
                 System.out.println("Peer unregistered: " + peerInfo.address);
+            }
+
+            if (loggedInUser != null) {
+                activeClients.remove(loggedInUser.getUsername());
             }
         }
 

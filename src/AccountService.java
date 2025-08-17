@@ -109,17 +109,25 @@ public class AccountService {
         return newUser;
     }
 
+    // --- MODIFICATION START ---
+    // Corrected logic to remove user from in-memory map and rewrite the CSV
     public synchronized boolean removeUser(String username) throws IOException {
-        loadUsers();
+        loadUsers(); // Ensure we have the latest user list
         if ("admin".equalsIgnoreCase(username)) {
-            return false;
+            return false; // Cannot remove the admin user
         }
+
+        // Remove the user from the in-memory map
         if (users.remove(username) != null) {
+            // Rewrite the CSV file with the updated user list
             rewriteUserCsvFile();
             return true;
         }
+
+        // User was not found
         return false;
     }
+    // --- MODIFICATION END ---
 
     public synchronized User login(String username, String password) {
         loadUsers();
@@ -134,6 +142,7 @@ public class AccountService {
         Path tempFilePath = getTempCsvPath();
         List<String> lines = new ArrayList<>();
         lines.add("username,passwordHash,downloadStats,uploadStats");
+        // Iterate through the updated 'users' map
         for (User user : users.values()) {
             if (!user.isAdmin()) {
                 lines.add(String.join(",",
@@ -150,8 +159,9 @@ public class AccountService {
 
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             try {
+                // Atomically move the temporary file to replace the original
                 Files.move(tempFilePath, userCsvPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-                return;
+                return; // Success
             } catch (IOException e) {
                 lastException = e;
                 if (attempt == MAX_RETRIES) {
@@ -166,6 +176,7 @@ public class AccountService {
                 }
             }
         }
+        // If all retries fail, throw the last exception caught
         throw lastException;
     }
 
@@ -224,4 +235,4 @@ public class AccountService {
                     adminUser.getUploadStats().toCsvString());
         }
     }
-}   
+}

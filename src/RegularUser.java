@@ -12,4 +12,10 @@ public class RegularUser extends User {
     public boolean isAdmin() {
         return false;
     }
+
+    @Override
+    public String getSharedDirectory() {
+        // Return empty for client
+        return "";
+    }
 }

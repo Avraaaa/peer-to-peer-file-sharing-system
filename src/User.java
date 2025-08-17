@@ -20,6 +20,8 @@ public abstract class User {
         return passwordHash;
     }
 
+    public abstract String getSharedDirectory();
+
     public abstract boolean isAdmin();
 
     public DownloadStats getDownloadStats() {
