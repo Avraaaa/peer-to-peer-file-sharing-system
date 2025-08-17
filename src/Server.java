@@ -97,9 +97,9 @@ public class Server {
                             break;
 
                         case "SIGNUP":
-                            String[] signupParts = command.split(" ", 4);
-                            if (signupParts.length < 4) continue;
-                            handleSignUp(signupParts[1], signupParts[2], signupParts[3], transport);
+                            String[] signupParts = command.split(" ", 3);
+                            if (signupParts.length < 3) continue;
+                            handleSignUp(signupParts[1], signupParts[2], transport);
                             break;
 
                         case "REGISTER":
@@ -146,7 +146,6 @@ public class Server {
                             handleRemoveUser(parts[1], transport);
                             break;
                         case "UNREGISTER":
-
                             if (loggedInUser != null) {
                                 try {
                                     accountService.saveUserStats(loggedInUser);
@@ -157,11 +156,10 @@ public class Server {
                             return;
                         case "UPDATE_STATS":
                             if (loggedInUser == null) {
-                                transport.sendLine("ERROR Not logged in");
                                 continue;
                             }
                             if (parts.length < 2) continue;
-                            handleUpdateStats(parts[1], transport);
+                            handleUpdateStats(parts[1]);
                             break;
                         default:
                             transport.sendLine("ERROR Unknown command");
@@ -187,7 +185,6 @@ public class Server {
                 String payload = String.join(";",
                         user.getUsername(),
                         String.valueOf(user.isAdmin()),
-                        user.getSharedDirectory(),
                         user.getDownloadStats().toCsvString(),
                         user.getUploadStats().toCsvString()
                 );
@@ -199,22 +196,12 @@ public class Server {
             }
         }
 
-        private void handleSignUp(String username, String password, String sharedDirectory, Transport transport) throws IOException {
+        private void handleSignUp(String username, String password, Transport transport) throws IOException {
             try {
-                String fullSharedPath;
-                Path userPath = Paths.get(sharedDirectory);
-
-                if (userPath.isAbsolute()) {
-                    fullSharedPath = userPath.toString();
-                } else {
-                    String saneDirectory = userPath.getFileName().toString();
-                    fullSharedPath = OUTPUT_DIRECTORY + File.separator + saneDirectory;
-                }
-
-                User newUser = accountService.createUser(username, password, fullSharedPath);
+                User newUser = accountService.createUser(username, password);
                 if (newUser != null) {
                     transport.sendLine("SIGNUP_SUCCESS User created. Please login.");
-                    System.out.println("New user signed up: " + username + " with shared dir: " + fullSharedPath);
+                    System.out.println("New user signed up: " + username);
                 }
             } catch (IOException e) {
                 transport.sendLine("SIGNUP_FAIL " + e.getMessage());
@@ -314,22 +301,18 @@ public class Server {
             }
         }
 
-        private void handleUpdateStats(String statsData, Transport transport) throws IOException {
+        private void handleUpdateStats(String statsData) {
             try {
                 String[] statsParts = statsData.split(";");
                 if (statsParts.length == 2) {
                     loggedInUser.getDownloadStats().fromCsvString(statsParts[0]);
                     loggedInUser.getUploadStats().fromCsvString(statsParts[1]);
-
                     accountService.saveUserStats(loggedInUser);
-
-                    transport.sendLine("UPDATE_STATS_SUCCESS Stats updated successfully.");
                     System.out.println("Stats updated for user '" + loggedInUser.getUsername() + "': " + statsData);
                 } else {
-                    transport.sendLine("UPDATE_STATS_FAIL Invalid stats format.");
+                    System.err.println("Invalid stats format from user '" + loggedInUser.getUsername() + "'");
                 }
             } catch (Exception e) {
-                transport.sendLine("UPDATE_STATS_FAIL Error updating stats: " + e.getMessage());
                 System.err.println("Error updating stats for user '" + loggedInUser.getUsername() + "': " + e.getMessage());
             }
         }
