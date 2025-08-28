@@ -109,25 +109,19 @@ public class AccountService {
         return newUser;
     }
 
-    // --- MODIFICATION START ---
-    // Corrected logic to remove user from in-memory map and rewrite the CSV
     public synchronized boolean removeUser(String username) throws IOException {
-        loadUsers(); // Ensure we have the latest user list
+        loadUsers();
         if ("admin".equalsIgnoreCase(username)) {
-            return false; // Cannot remove the admin user
+            return false;
         }
 
-        // Remove the user from the in-memory map
         if (users.remove(username) != null) {
-            // Rewrite the CSV file with the updated user list
             rewriteUserCsvFile();
             return true;
         }
 
-        // User was not found
         return false;
     }
-    // --- MODIFICATION END ---
 
     public synchronized User login(String username, String password) {
         loadUsers();
@@ -161,7 +155,7 @@ public class AccountService {
             try {
                 // Atomically move the temporary file to replace the original
                 Files.move(tempFilePath, userCsvPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-                return; // Success
+                return;
             } catch (IOException e) {
                 lastException = e;
                 if (attempt == MAX_RETRIES) {
@@ -225,9 +219,13 @@ public class AccountService {
 
     private void saveAdminStatsToFile(User adminUser) throws IOException {
         Path parentDir = userCsvPath.getParent();
-        Path adminStatsPath = (parentDir != null) ?
-                parentDir.resolve("admin_stats.csv") :
-                Paths.get("admin_stats.csv");
+        Path adminStatsPath;
+        if (parentDir != null) {
+            adminStatsPath = parentDir.resolve("admin_stats.csv");
+        } else {
+            adminStatsPath = Paths.get("admin_stats.csv");
+        }
+
 
         try (PrintWriter writer = new PrintWriter(new FileWriter(adminStatsPath.toFile()))) {
             writer.println("downloadStats,uploadStats");

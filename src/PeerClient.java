@@ -3,527 +3,500 @@ import java.net.*;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.zip.ZipFile;
+import java.util.stream.Collectors;
 
 public class PeerClient {
-
-    private static final String DEFAULT_SERVER_HOST = "localhost";
-    private static final int DEFAULT_SERVER_PORT = 9090;
-
-    private final String serverHost;
-    private final int serverPort;
-
-    private static final int MIN_PORT = 8001;
-    private static final int MAX_PORT = 10000;
-
-    private User loggedInUser;
-    private int myListenPort;
+    private String serverHost;
+    private int serverPort;
+    private final int myListenPort;
+    private final int myUdpPort;
     private FileHandler fileHandler;
     private DownloadStrategy downloadStrategy;
+    private Transport serverTransport;
+    private User loggedInUser;
     private final Set<String> knownSharedFiles = ConcurrentHashMap.newKeySet();
-
-    private Thread downloadListenerThread;
-    private ServerSocket downloadListenerSocket;
     private Thread directoryWatcherThread;
-    private Thread udpListenerThread;
-    private UDPRequestHandler udpRequestHandler;
-
-    private final ClientConfigurationService configService;
 
 
-    public PeerClient(String serverHost, int serverPort) {
+    public PeerClient(String serverHost, int serverPort, int myListenPort, FileHandler fileHandler, DownloadStrategy downloadStrategy) {
         this.serverHost = serverHost;
         this.serverPort = serverPort;
-        this.configService = new ClientConfigurationService("client_config.csv");
+        this.myListenPort = myListenPort;
+        this.myUdpPort = myListenPort + 1;
+        this.fileHandler = fileHandler;
+        this.downloadStrategy = downloadStrategy;
     }
 
-
-    private int allocateAvailablePort() {
-        for (int port = MIN_PORT; port <= MAX_PORT; port++) {
-            try (ServerSocket testSocket = new ServerSocket(port);
-                 DatagramSocket testUdpSocket = new DatagramSocket(port + 1)) {
-                System.out.println("Allocated TCP port: " + port);
-                System.out.println("Allocated UDP port: " + (port + 1));
-                return port;
-            } catch (IOException e) {
-                // Port is in use
-            }
-        }
-        System.err.println("No available ports found in range " + MIN_PORT + "-" + MAX_PORT);
-        return -1;
+    public void setSessionContext(User user, Transport transport) {
+        this.loggedInUser = user;
+        this.serverTransport = transport;
     }
 
-    public static void main(String[] args) {
-        String serverHost = DEFAULT_SERVER_HOST;
-        int serverPort = DEFAULT_SERVER_PORT;
+    public static void main(String[] args) throws IOException {
+        String serverHost = "localhost";
+        int serverPort = 9090;
+        User loggedInUser = null;
 
-        System.out.println("Connecting to server at " + serverHost + ":" + serverPort);
-        new PeerClient(serverHost, serverPort).start();
-    }
-
-    public void start() {
-        try (
-                Transport serverTransport = new TCPTransport(serverHost, serverPort);
-                Scanner console = new Scanner(System.in)
-        ) {
-            System.out.println("Connected to the Napster server.");
-
-            while (true) {
-                if (loggedInUser == null) {
-                    showPreLoginMenu();
-                    String choice = console.nextLine();
-                    switch (choice) {
-                        case "1": handleLogin(serverTransport, console); break;
-                        case "2": handleSignUp(serverTransport, console); break;
-                        case "3": System.out.println("Exiting client."); return;
-                        default: System.out.println("Invalid option. Please try again.");
-                    }
-                } else {
-                    showPostLoginMenu();
-                    String choice = console.nextLine();
-                    switch (choice) {
-                        case "1": handleSearchAndDownload(serverTransport, console); break;
-                        case "2": handleListPeers(serverTransport); break;
-                        case "3": handleBrowsePeerFiles(serverTransport, console); break;
-                        case "4": handleViewStatistics(); break;
-                        case "5":
-                            if (loggedInUser.isAdmin()) {
-                                handleRemoveUser(serverTransport, console);
-                            } else {
-                                handleLogout(serverTransport);
-                            }
-                            break;
-                        case "6":
-                            if (loggedInUser.isAdmin()) {
-                                handleLogout(serverTransport);
-                            } else {
-                                System.out.println("Invalid option. Please try again.");
-                            }
-                            break;
-                        default: System.out.println("Invalid option. Please try again.");
-                    }
-                }
-            }
-        } catch (ConnectException e) {
-            System.err.println("FATAL: Could not connect to the server at " + serverHost + ":" + serverPort);
-        } catch (IOException e) {
-            System.err.println("An error occurred: " + e.getMessage());
-        } finally {
-            shutdownLocalServices();
-        }
-    }
-
-    private void showPreLoginMenu() {
-        System.out.println("\n--- Welcome ---");
-        System.out.println("[1] Login");
-        System.out.println("[2] Sign Up");
-        System.out.println("[3] Exit");
-        System.out.print("> ");
-    }
-
-    private void showPostLoginMenu() {
-        System.out.printf("\n--- Logged in as %s ---\n", loggedInUser.getUsername());
-        System.out.println("[1] Search for a file");
-        System.out.println("[2] List online peers");
-        System.out.println("[3] Browse a peer's files");
-        System.out.println("[4] View my statistics");
-        if (loggedInUser.isAdmin()) {
-            System.out.println("[5] Remove a user (Admin)");
-            System.out.println("[6] Logout");
-        } else {
-            System.out.println("[5] Logout");
-        }
-        System.out.print("> ");
-    }
-
-    private void handleLogin(Transport serverTransport, Scanner console) throws IOException {
-        System.out.print("Enter username: ");
-        String username = console.nextLine();
-        System.out.print("Enter password: ");
-        String password = console.nextLine();
-
-        System.out.println("Automatically allocating a port for file sharing...");
-        this.myListenPort = allocateAvailablePort();
-        if (this.myListenPort == -1) {
-            System.err.println("Failed to allocate a port. Cannot proceed with login.");
-            return;
-        }
-
-        serverTransport.sendLine("LOGIN " + username + " " + password);
-        String response = serverTransport.readLine();
-
-        if (response != null && response.startsWith("LOGIN_SUCCESS")) {
-            String[] parts = response.split(" ", 2);
-            String[] payload = parts[1].split(";", 4);
-
-            String receivedUsername = payload[0];
-            boolean isAdmin = Boolean.parseBoolean(payload[1]);
-            String downloadStatsStr = payload.length > 2 ? payload[2] : "";
-            String uploadStatsStr = payload.length > 3 ? payload[3] : "";
-
-            if (isAdmin) {
-                DownloadStats downloadStats = new DownloadStats();
-                UploadStats uploadStats = new UploadStats();
-                if (!downloadStatsStr.isEmpty()) downloadStats.fromCsvString(downloadStatsStr);
-                if (!uploadStatsStr.isEmpty()) uploadStats.fromCsvString(uploadStatsStr);
-                this.loggedInUser = new AdminUser("", downloadStats, uploadStats);
-            } else {
-                DownloadStats downloadStats = new DownloadStats();
-                UploadStats uploadStats = new UploadStats();
-                if (!downloadStatsStr.isEmpty()) downloadStats.fromCsvString(downloadStatsStr);
-                if (!uploadStatsStr.isEmpty()) uploadStats.fromCsvString(uploadStatsStr);
-                this.loggedInUser = new RegularUser(receivedUsername, "", downloadStats, uploadStats);
-            }
-
-            System.out.println("Login successful. Welcome, " + loggedInUser.getUsername() + "!");
-
-            String sharedDirectoryPath = configService.getSharedDirectory(loggedInUser.getUsername());
-            if (sharedDirectoryPath == null || sharedDirectoryPath.trim().isEmpty()) {
-                System.out.println("\nIt appears this is your first time logging in on this client.");
-                System.out.print("Please enter the full path to your shared folder: ");
-                sharedDirectoryPath = console.nextLine();
-                configService.saveSharedDirectory(loggedInUser.getUsername(), sharedDirectoryPath);
-                System.out.println("Shared directory path has been saved locally.");
-            }
-
-            initializeLocalServices(sharedDirectoryPath, serverTransport);
-        } else {
-            System.out.println("Login failed: " + (response != null ? response : "No response from server."));
-        }
-    }
-
-    private void handleSignUp(Transport serverTransport, Scanner console) throws IOException {
-        System.out.print("Choose a username: ");
-        String username = console.nextLine();
-        System.out.print("Choose a password: ");
-        String password = console.nextLine();
-        System.out.print("Enter path to your shared folder (e.g., 'my_files' or 'C:\\Users\\p2p_share'): ");
-        String sharedDirectoryPath = console.nextLine();
-
-        serverTransport.sendLine("SIGNUP " + username + " " + password);
-        String response = serverTransport.readLine();
-        if (response != null && response.startsWith("SIGNUP_SUCCESS")) {
-            System.out.println("Signup successful! Saving your local shared folder configuration...");
-            configService.saveSharedDirectory(username, sharedDirectoryPath);
-            System.out.println("You can now log in.");
-        } else {
-            System.out.println("Signup failed: " + (response != null ? response : "No response from server."));
-        }
-    }
-
-    private void handleLogout(Transport serverTransport) throws IOException {
-        System.out.println("Logging out...");
-        serverTransport.sendLine("UNREGISTER");
-        shutdownLocalServices();
-        this.loggedInUser = null;
-        this.knownSharedFiles.clear();
-    }
-
-    private void initializeLocalServices(String sharedDirectoryPath, Transport serverTransport) throws IOException {
-        this.fileHandler = new LocalFileHandler(sharedDirectoryPath);
-        Path sharedDir = ((LocalFileHandler) fileHandler).getSharedDirectory().toAbsolutePath();
-        // Use the new robust ChunkedDownload class
-        this.downloadStrategy = new ChunkedDownload(8192, fileHandler, sharedDir);
-        System.out.println("File sharing is active for directory: " + sharedDir);
-
-        this.downloadListenerSocket = new ServerSocket(myListenPort);
-        this.downloadListenerThread = new Thread(new DownloadListener(downloadListenerSocket, fileHandler, this, serverTransport));
-        this.downloadListenerThread.start();
-
-        int udpPort = myListenPort + 1;
-        this.udpRequestHandler = new UDPRequestHandler(udpPort, this.fileHandler);
-        this.udpListenerThread = new Thread(this.udpRequestHandler);
-        this.udpListenerThread.start();
-
-
-        this.directoryWatcherThread = new Thread(new DirectoryWatcher(sharedDir, serverTransport));
-        this.directoryWatcherThread.start();
-
-        serverTransport.sendLine("REGISTER " + myListenPort);
-        shareInitialFiles(serverTransport);
-    }
-
-    private void shareInitialFiles(Transport serverTransport) {
-        System.out.println("Sharing initial files...");
-        List<SharedFile> sharedFiles = ((LocalFileHandler) fileHandler).listSharedFileObjects();
-
-        if (sharedFiles.isEmpty()) {
-            System.out.println("... No files found to share.");
-        } else {
-            for (SharedFile sf : sharedFiles) {
-                String fileName = sf.getName();
-                if (knownSharedFiles.add(fileName)) {
-                    System.out.println("... sharing " + sf.getFileInfo());
-                    try {
-                        serverTransport.sendLine("SHARE " + fileName);
-                    } catch (IOException e) {
-                        System.err.println("Failed to share file " + fileName + ": " + e.getMessage());
-                    }
-                }
-            }
-        }
-    }
-
-
-    private void shutdownLocalServices() {
-        if (directoryWatcherThread != null && directoryWatcherThread.isAlive()) {
-            directoryWatcherThread.interrupt();
-        }
-        if (downloadListenerSocket != null && !downloadListenerSocket.isClosed()) {
-            try { downloadListenerSocket.close(); } catch (IOException e) { /* ignore */ }
-        }
-        if (downloadListenerThread != null && downloadListenerThread.isAlive()) {
-            downloadListenerThread.interrupt();
-        }
-        if (udpRequestHandler != null) {
-            udpRequestHandler.stop();
-        }
-        if (udpListenerThread != null && udpListenerThread.isAlive()) {
-            udpListenerThread.interrupt();
-        }
-        System.out.println("Local services shut down.");
-    }
-
-    private void handleListPeers(Transport serverTransport) throws IOException {
-        serverTransport.sendLine("LIST_PEERS");
-        String response = serverTransport.readLine();
-        System.out.println("\n--- Online Peers ---");
-        if (response == null || response.isEmpty()) {
-            System.out.println("No other peers are online.");
-        } else {
-
-            String[] peers = response.split(",");
-            for (String peer : peers) {
-                System.out.println(peer);
-            }
-        }
-        System.out.println("--------------------");
-    }
-
-    private void handleBrowsePeerFiles(Transport serverTransport, Scanner console) throws IOException {
-        serverTransport.sendLine("LIST_PEERS");
-        String response = serverTransport.readLine();
-        System.out.println("\n--- Online Peers ---");
-        if (response == null || response.isEmpty()) {
-            System.out.println("No other peers are online to browse.");
-            return;
-        }
-
-        List<String> peers = new ArrayList<>(Arrays.asList(response.split(",")));
-        List<String> otherPeers = new ArrayList<>();
-
-        for (String peer : peers) {
-            try {
-                int peerPort = Integer.parseInt(peer.split(":")[1]);
-                if (peerPort != this.myListenPort) {
-                    otherPeers.add(peer);
-                }
-            } catch (NumberFormatException | ArrayIndexOutOfBoundsException e) { /* ignore malformed peer strings */ }
-        }
-
-        if (otherPeers.isEmpty()) {
-            System.out.println("No *other* peers are online to browse.");
-            return;
-        }
-
-        for (int i = 0; i < otherPeers.size(); i++) {
-            System.out.printf("[%d] %s\n", i + 1, otherPeers.get(i));
-        }
-        System.out.println("--------------------");
-        System.out.print("Choose a peer to browse (enter number, or 0 to cancel): ");
-
+        Transport serverTransport = null;
         try {
-            int choice = Integer.parseInt(console.nextLine());
-            if (choice <= 0 || choice > otherPeers.size()) {
-                System.out.println("Browse cancelled.");
-                return;
-            }
+            serverTransport = new TCPTransport(serverHost, serverPort);
+            System.out.println("Connected to server at " + serverHost + ":" + serverPort);
+        } catch (IOException e) {
+            System.err.println("FATAL: Could not connect to the server at " + serverHost + ":" + serverPort);
+            return;
+        }
 
-            String peerAddress = otherPeers.get(choice - 1);
-            System.out.println("\nFetching file list from " + peerAddress + "...");
+        Scanner scanner = new Scanner(System.in);
+        String localSharedDirectory = "";
 
-            String fileListResponse = getFileListFromPeer(peerAddress);
-            if (fileListResponse == null || fileListResponse.isEmpty() || fileListResponse.startsWith("Error:")) {
-                System.out.println("Could not retrieve file list from peer. They might be offline or an error occurred.");
-                return;
-            }
+        while (loggedInUser == null) {
+            System.out.println("\n--- Welcome to Napster Clone ---");
+            System.out.println("1. Login");
+            System.out.println("2. Sign Up");
+            System.out.println("3. Exit");
+            System.out.print("Choose an option: ");
+            String choice = scanner.nextLine();
 
-            List<String> files = Arrays.asList(fileListResponse.split(","));
-            if (files.isEmpty() || (files.size() == 1 && files.get(0).isEmpty())) {
-                System.out.println("Peer " + peerAddress + " is not sharing any files.");
-                return;
-            }
+            switch (choice) {
+                case "1":
+                    System.out.print("Enter username: ");
+                    String username = scanner.nextLine();
+                    System.out.print("Enter password: ");
+                    String password = scanner.nextLine();
 
-            System.out.println("\n--- Files on " + peerAddress + " ---");
-            for (int i = 0; i < files.size(); i++) {
-                System.out.printf("[%d] %s\n", i + 1, files.get(i));
-            }
-            System.out.println("---------------------------------");
+                    serverTransport.sendLine("LOGIN " + username + " " + password);
+                    String response = serverTransport.readLine();
 
-            while (true) {
-                System.out.print("Enter a file number for details (e.g., size), or 0 to go back: ");
-                int fileChoice = Integer.parseInt(console.nextLine());
-                if (fileChoice <= 0 || fileChoice > files.size()) {
-                    break;
-                }
+                    if (response != null && response.startsWith("LOGIN_SUCCESS")) {
+                        String[] payload = response.substring(14).split(";", 4);
+                        String u = payload[0];
+                        boolean isAdmin = Boolean.parseBoolean(payload[1]);
+                        DownloadStats dStats = new DownloadStats();
+                        dStats.fromCsvString(payload[2]);
+                        UploadStats uStats = new UploadStats();
+                        uStats.fromCsvString(payload[3]);
 
-                String fileName = files.get(fileChoice - 1);
-                System.out.println("Querying details for '" + fileName + "'...");
+                        ClientConfigurationService configService = new ClientConfigurationService("client_config.csv");
+                        localSharedDirectory = configService.getSharedDirectory(u);
 
-                long fileSize = getPeerFileSize(peerAddress, fileName);
-                if (fileSize != -1) {
-                    System.out.println("  - Size: " + formatFileSize(fileSize));
-                } else {
-                    System.out.println("  - Could not retrieve file size.");
-                }
+                        if (localSharedDirectory == null) {
+                            System.out.println("\n--- Welcome, " + u + "! First-time setup on this machine. ---");
+                            System.out.print("Please specify a directory for your shared files (e.g., " + u + "_files): ");
+                            String dirPathInput = scanner.nextLine();
 
-                if (fileName.toLowerCase().endsWith(".zip")) {
-                    int zipCount = getRemoteZipFileCount(peerAddress, fileName);
-                    if (zipCount != -1) {
-                        System.out.println("  - Archive contains: " + zipCount + " files/folders");
+                            Path userPath = Paths.get(dirPathInput);
+                            if (!userPath.isAbsolute()) {
+                                userPath = Paths.get(System.getProperty("user.dir"), dirPathInput).toAbsolutePath();
+                            }
+
+                            if (!Files.exists(userPath)) {
+                                Files.createDirectories(userPath);
+                            }
+                            localSharedDirectory = userPath.toString();
+                            configService.saveSharedDirectory(u, localSharedDirectory);
+                            System.out.println("Shared directory for user '" + u + "' set to: " + localSharedDirectory);
+                        } else {
+                            System.out.println("Welcome back, " + u + "! Using configured directory: " + localSharedDirectory);
+                        }
+
+                        if (isAdmin) {
+                            loggedInUser = new AdminUser("", dStats, uStats);
+                        } else {
+                            loggedInUser = new RegularUser(u, "", dStats, uStats);
+                        }
+                        System.out.println("Login successful!");
                     } else {
-                        System.out.println("  - Could not retrieve zip file details.");
+                        if (response != null) {
+                            System.err.println("Login failed: " + response.replace("LOGIN_FAIL ", ""));
+                        } else {
+                            System.err.println("Login failed: No response from server.");
+                        }
+                    }
+                    break;
+
+                case "2":
+                    System.out.print("Enter a new username: ");
+                    String newUsername = scanner.nextLine();
+                    System.out.print("Enter a password: ");
+                    String newPassword = scanner.nextLine();
+
+                    serverTransport.sendLine("SIGNUP " + newUsername + " " + newPassword);
+                    String signupResponse = serverTransport.readLine();
+
+                    if ("SIGNUP_SUCCESS".equals(signupResponse)) {
+                        System.out.println("Account created successfully! Please log in.");
+                    } else {
+                        System.err.println("Could not create account: " + (signupResponse != null ? signupResponse.replace("SIGNUP_FAIL ", "") : "No response from server."));
+                    }
+                    break;
+                case "3":
+                    System.out.println("Exiting.");
+                    serverTransport.close();
+                    return;
+                default:
+                    System.out.println("Invalid option.");
+            }
+        }
+
+        Path userSharedPath = Paths.get(localSharedDirectory);
+        if (!Files.exists(userSharedPath)) {
+            System.out.println("Shared directory not found for user, creating it at: " + userSharedPath.toAbsolutePath());
+            Files.createDirectories(userSharedPath);
+        }
+
+        System.out.println("\nSearching for an available network port...");
+        int myPort = findAvailablePortPair();
+        if (myPort == -1) {
+            System.err.println("FATAL: Could not find any available ports.");
+            serverTransport.close();
+            return;
+        }
+        System.out.println("--> Automatically assigned TCP Port " + myPort + " and UDP Port " + (myPort + 1));
+
+        FileHandler fileHandler = new LocalFileHandler(localSharedDirectory);
+        DownloadStrategy downloadStrategy = new ChunkedDownload(8192, fileHandler, userSharedPath);
+
+        PeerClient client = new PeerClient(serverHost, serverPort, myPort, fileHandler, downloadStrategy);
+        client.setSessionContext(loggedInUser, serverTransport);
+        client.start(localSharedDirectory);
+    }
+
+    public void start(String sharedDirectoryPath) throws IOException {
+        serverTransport.sendLine("REGISTER " + myListenPort);
+        registerAndShareFiles();
+
+        Path sharedPath = Paths.get(sharedDirectoryPath);
+        directoryWatcherThread = new Thread(new DirectoryWatcher(sharedPath, serverTransport));
+        directoryWatcherThread.setDaemon(true);
+        directoryWatcherThread.start();
+
+        class TcpServerTask implements Runnable {
+            private int myListenPort;
+
+            public TcpServerTask(int myListenPort) {
+                this.myListenPort = myListenPort;
+            }
+
+            @Override
+            public void run() {
+                try (ServerSocket serverSocket = new ServerSocket(myListenPort)) {
+                    System.out.println("TCP Download Server listening on port " + myListenPort);
+
+                    while (!serverSocket.isClosed()) {
+                        new Thread(new DownloadHandler(serverSocket.accept())).start();
+                    }
+                } catch (IOException e) {
+                    if (!"Socket closed".equals(e.getMessage())) {
+                        System.err.println("FATAL: Failed to listen for TCP connections: " + e.getMessage());
                     }
                 }
             }
+        }
+        Thread tcpServerThread = new Thread(new TcpServerTask(myListenPort));
+        tcpServerThread.start();
 
-        } catch (NumberFormatException e) {
-            System.out.println("Invalid input. Please enter a number.");
+        new Thread(new UdpRequestHandler(myUdpPort)).start();
+        handleUserInput();
+    }
+
+    private void registerAndShareFiles() throws IOException {
+        for (String fileName : fileHandler.listSharedFiles()) {
+            serverTransport.sendLine("SHARE " + fileName);
+            knownSharedFiles.add(fileName);
         }
     }
 
+    private void handleUserInput() throws IOException {
+        if (loggedInUser.isAdmin()) {
+            handleAdminInput();
+        } else {
+            handleRegularUserInput();
+        }
+    }
 
-    private void handleSearchAndDownload(Transport serverTransport, Scanner console) throws IOException {
-        System.out.print("Enter filename to search for: ");
-        String fileName = console.nextLine();
+    private void handleRegularUserInput() throws IOException {
+        Scanner scanner = new Scanner(System.in);
+        while (true) {
+            System.out.println("\nOptions: [1] Search Files [2] List Peers [3] Browse Peer's Files [4] My Stats [5] Exit");
+            System.out.print("Choose an option: ");
+            String choice = scanner.nextLine();
+            switch (choice) {
+                case "1":
+                    System.out.print("Enter filename to search: ");
+                    searchAndDownload(scanner.nextLine());
+                    break;
+                case "2":
+                    listPeers();
+                    break;
+                case "3":
+                    browseAndDownload();
+                    break;
+                case "4":
+                    displayMyStats();
+                    break;
+                case "5":
+                    serverTransport.sendLine("UNREGISTER");
+                    serverTransport.close();
+                    System.exit(0);
+                    return;
+                default:
+                    System.out.println("Invalid option.");
+            }
+        }
+    }
 
+    private void handleAdminInput() throws IOException {
+        Scanner scanner = new Scanner(System.in);
+        while (true) {
+            System.out.println("\n--- ADMIN MENU ---");
+            System.out.println("[1] Search Files  [2] List Peers  [3] Browse Peer's Files  [4] Remove User  [5] My Stats [6] Exit");
+            System.out.print("Choose an option: ");
+            String choice = scanner.nextLine();
+            switch (choice) {
+                case "1":
+                    System.out.print("Enter filename to search: ");
+                    searchAndDownload(scanner.nextLine());
+                    break;
+                case "2":
+                    listPeers();
+                    break;
+                case "3":
+                    browseAndDownload();
+                    break;
+                case "4":
+                    removeUser();
+                    break;
+                case "5":
+                    displayMyStats();
+                    break;
+                case "6":
+                    serverTransport.sendLine("UNREGISTER");
+                    serverTransport.close();
+                    System.exit(0);
+                    return;
+                default:
+                    System.out.println("Invalid option.");
+            }
+        }
+    }
+
+    private void displayMyStats() {
+        System.out.println("\n--- Your User Stats ---");
+        System.out.println("Username: " + loggedInUser.getUsername());
+        System.out.println("\n--- Download Stats ---");
+        System.out.println("Files Downloaded: " + loggedInUser.getDownloadStats().getFileCount());
+        System.out.println("Total Bytes Downloaded: " + formatFileSize(loggedInUser.getDownloadStats().getTotalBytes()));
+        System.out.println("\n--- Upload Stats ---");
+        System.out.println("Files Uploaded: " + loggedInUser.getUploadStats().getFileCount());
+        System.out.println("Total Bytes Uploaded: " + formatFileSize(loggedInUser.getUploadStats().getTotalBytes()));
+        System.out.println("-----------------------");
+    }
+
+    private void searchAndDownload(String fileName) throws IOException {
         serverTransport.sendLine("SEARCH " + fileName);
         String response = serverTransport.readLine();
-
-        if (response == null || response.isEmpty()) {
-            System.out.println("File '" + fileName + "' not found on any peer.");
+        Map<String, String> peersWithFile = parsePeerInfoResponse(response);
+        if (peersWithFile.isEmpty()) {
+            System.out.println("No peers found with this file.");
             return;
         }
-
-        List<String> peersWithFile = Arrays.asList(response.split(","));
-        System.out.println("\n--- File available on ---");
-        for (int i = 0; i < peersWithFile.size(); i++) {
-            System.out.printf("[%d] %s\n", i + 1, peersWithFile.get(i));
-        }
-        System.out.println("-------------------------");
-        System.out.print("Choose a peer to download from (enter number, or 0 to cancel): ");
-
-        try {
-            int choice = Integer.parseInt(console.nextLine());
-            if (choice > 0 && choice <= peersWithFile.size()) {
-                String peerAddress = peersWithFile.get(choice - 1);
-                downloadFile(peerAddress, fileName, serverTransport);
-                serverTransport.sendLine("SHARE " + fileName);
-            } else {
-                System.out.println("Download cancelled.");
+        System.out.println("\nVerifying which peers have the file...");
+        Map<String, String> validPeers = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : peersWithFile.entrySet()) {
+            if (getPeerFileSize(entry.getValue(), fileName) > -1) {
+                validPeers.put(entry.getKey(), entry.getValue());
             }
-        } catch (NumberFormatException e) {
-            System.out.println("Invalid input. Please enter a number.");
         }
-    }
-
-    private void downloadFile(String peerAddress, String fileName, Transport serverTransport) {
-        System.out.println("Attempting to download '" + fileName + "' from " + peerAddress + "...");
-        try {
-            long fileSizeBefore = getFileSize(fileName);
+        if (validPeers.isEmpty()) {
+            System.out.println("No available peer has the file: " + fileName);
+            return;
+        }
+        System.out.println("\nFile found on the following peers:");
+        System.out.printf("%-20s %s\n", "Username", "Peer Address");
+        System.out.println("------------------------------------------");
+        for (Map.Entry<String, String> entry : validPeers.entrySet()) {
+            String user = entry.getKey();
+            String addr = entry.getValue();
+            System.out.printf("%-20s %s%n", user, addr);
+        }
+        System.out.println("--------------------");
+        System.out.print("\nEnter USERNAME to download from: ");
+        String chosenUsername = new Scanner(System.in).nextLine();
+        if (validPeers.containsKey(chosenUsername)) {
+            String peerAddress = validPeers.get(chosenUsername);
+            System.out.println("Starting download of '" + fileName + "' from " + chosenUsername + " at " + peerAddress);
+            long fileSize = getPeerFileSize(peerAddress, fileName);
             downloadStrategy.download(peerAddress, fileName);
-            long fileSizeAfter = getFileSize(fileName);
-
-            if (fileSizeAfter > fileSizeBefore) {
+            if (fileSize > 0) {
                 loggedInUser.getDownloadStats().addFile();
-                loggedInUser.getDownloadStats().addBytes(fileSizeAfter - fileSizeBefore);
-                System.out.println("Download complete: " + fileName + " (" + (fileSizeAfter - fileSizeBefore) + " bytes)");
-
-                sendStatsToServer(serverTransport);
-            } else {
-                System.out.println("Download complete: " + fileName);
+                loggedInUser.getDownloadStats().addBytes(fileSize);
+                updateRemoteStats();
+                System.out.println("Your download stats have been updated with the server.");
             }
-        } catch (IOException e) {
-            System.err.println("Download failed: " + e.getMessage());
-        }
-    }
-
-    private long getFileSize(String fileName) {
-        try {
-            if (fileHandler.fileExists(fileName)) {
-                Path filePath = ((LocalFileHandler) fileHandler).getSharedDirectory().resolve(fileName);
-                return Files.size(filePath);
-            }
-        } catch (IOException e) {
-            // Ignore
-        }
-        return 0;
-    }
-
-
-    private void handleRemoveUser(Transport serverTransport, Scanner console) throws IOException {
-        System.out.print("Enter username to remove: ");
-        String userToRemove = console.nextLine();
-        serverTransport.sendLine("REMOVE_USER " + userToRemove);
-        String response = serverTransport.readLine();
-        System.out.println("Server response: " + response);
-    }
-
-    private void handleViewStatistics() {
-        System.out.println("\n--- Your Statistics ---");
-        System.out.println("Downloaded files: " + loggedInUser.getDownloadStats().getFileCount());
-        System.out.println("Downloaded bytes: " + formatFileSize(loggedInUser.getDownloadStats().getTotalBytes()));
-        System.out.println("Uploaded files: " + loggedInUser.getUploadStats().getFileCount());
-        System.out.println("Uploaded bytes: " + formatFileSize(loggedInUser.getUploadStats().getTotalBytes()));
-        System.out.println("-------------------------");
-    }
-
-    private String formatFileSize(long bytes) {
-        if (bytes < 0) return "N/A";
-        if (bytes == 0) return "0 B";
-
-        String[] units = {"B", "KB", "MB", "GB", "TB"};
-        int unitIndex = 0;
-        double size = bytes;
-
-        while (size >= 1024 && unitIndex < units.length - 1) {
-            size /= 1024;
-            unitIndex++;
-        }
-
-        if (unitIndex == 0) {
-            return String.format("%.0f %s", size, units[unitIndex]);
+            serverTransport.sendLine("SHARE " + fileName);
         } else {
-            return String.format("%.2f %s", size, units[unitIndex]);
+            System.out.println("Invalid username selected.");
         }
     }
 
-    private void sendStatsToServer(Transport serverTransport) {
-        try {
-            String statsData = loggedInUser.getDownloadStats().toCsvString() + ";" +
-                    loggedInUser.getUploadStats().toCsvString();
-            serverTransport.sendLine("UPDATE_STATS " + statsData);
-        } catch (IOException e) {
-            System.err.println("Failed to send stats to server: " + e.getMessage());
+    private void browseAndDownload() throws IOException {
+        System.out.println("\n--- Browse Peer's Files ---");
+        Map<String, String> onlinePeers = listPeers();
+        if (onlinePeers.isEmpty()) {
+            return;
+        }
+        System.out.print("Choose a peer to browse by entering their USERNAME: ");
+        Scanner scanner = new Scanner(System.in);
+        String chosenUsername = scanner.nextLine();
+        if (!onlinePeers.containsKey(chosenUsername)) {
+            System.out.println("Invalid or offline username selected.");
+            return;
+        }
+        String peerAddress = onlinePeers.get(chosenUsername);
+        List<String> fileNames = getFileListFromPeer(peerAddress);
+        if (fileNames == null || fileNames.isEmpty()) {
+            System.out.println("Peer " + chosenUsername + " has no shared files or did not respond.");
+            return;
+        }
+        List<SharedFile> sharedFiles = new ArrayList<>();
+        System.out.println("\nFetching file details from " + chosenUsername + "...");
+        for (String fileName : fileNames) {
+            long fileSize = getPeerFileSize(peerAddress, fileName);
+            sharedFiles.add(SharedFileFactory.createSharedFile(fileName, fileSize));
+        }
+        System.out.println("\n--- Files available from " + chosenUsername + " ---");
+        for (int i = 0; i < sharedFiles.size(); i++) {
+            SharedFile file = sharedFiles.get(i);
+            System.out.printf("%d. %s (%s, Type: %s)\n", i + 1, file.getName(), formatFileSize(file.getSize()), file.getClass().getSimpleName());
+        }
+        System.out.println("---------------------------------------");
+        System.out.print("Enter file number to download, or type 'info [number]' for details: ");
+        String input = scanner.nextLine();
+        if (input.toLowerCase().startsWith("info")) {
+            try {
+                int fileIndex = Integer.parseInt(input.split(" ")[1]) - 1;
+                if (fileIndex >= 0 && fileIndex < sharedFiles.size()) {
+                    SharedFile selectedFile = sharedFiles.get(fileIndex);
+                    if (selectedFile instanceof ArchivedFile) {
+                        System.out.println("Querying peer for archive details...");
+                        int realFileCount = getRemoteZipFileCount(peerAddress, selectedFile.getName());
+                        selectedFile = new ArchivedFile(selectedFile.getName(), selectedFile.getSize(), realFileCount);
+                    }
+                    System.out.println("\n--- File Details ---\n" + selectedFile.getFileInfo() + "\n--------------------");
+                } else {
+                    System.err.println("Invalid file number.");
+                }
+            } catch (Exception e) {
+                System.err.println("Invalid command format. Use 'info [number]'.");
+            }
+        } else {
+            try {
+                int fileIndex = Integer.parseInt(input) - 1;
+                if (fileIndex >= 0 && fileIndex < sharedFiles.size()) {
+                    SharedFile selectedFile = sharedFiles.get(fileIndex);
+                    System.out.println("Downloading '" + selectedFile.getName() + "' from " + chosenUsername + " via TCP...");
+                    downloadStrategy.download(peerAddress, selectedFile.getName());
+                    if (selectedFile.getSize() > 0) {
+                        loggedInUser.getDownloadStats().addFile();
+                        loggedInUser.getDownloadStats().addBytes(selectedFile.getSize());
+                        updateRemoteStats();
+                        System.out.println("Your download stats have been updated with the server.");
+                    }
+                    serverTransport.sendLine("SHARE " + selectedFile.getName());
+                } else {
+                    System.err.println("Invalid file number selected.");
+                }
+            } catch (NumberFormatException e) {
+                System.err.println("Invalid input. Please enter a file number or 'info' command.");
+            }
         }
     }
 
+    private void removeUser() throws IOException {
+        Scanner scanner = new Scanner(System.in);
+        System.out.println("\n--- Remove a User ---");
+        Map<String, String> onlinePeers = listPeers();
+        System.out.print("Enter the USERNAME of the user to remove: ");
+        String usernameToRemove = scanner.nextLine();
+        if (loggedInUser.getUsername().equalsIgnoreCase(usernameToRemove)) {
+            System.err.println("You cannot remove yourself.");
+            return;
+        }
+        System.out.print("Are you sure you want to PERMANENTLY remove user '" + usernameToRemove + "'? (y/n): ");
+        if (!scanner.nextLine().equalsIgnoreCase("y")) {
+            System.out.println("Removal cancelled.");
+            return;
+        }
+        serverTransport.sendLine("REMOVE_USER " + usernameToRemove);
+        String response = serverTransport.readLine();
+        if ("REMOVE_SUCCESS".equals(response)) {
+            System.out.println("Server has removed user '" + usernameToRemove + "'.");
+            if (onlinePeers.containsKey(usernameToRemove)) {
+                String peerAddress = onlinePeers.get(usernameToRemove);
+                System.out.println("Sending shutdown signal to " + peerAddress + "...");
+                try (Transport peerTransport = new TCPTransport(peerAddress.split(":")[0], Integer.parseInt(peerAddress.split(":")[1]))) {
+                    peerTransport.sendLine("_KICK_ " + usernameToRemove);
+                } catch (IOException e) {
+                    System.err.println("Could not send kick signal. The peer may have already disconnected. " + e.getMessage());
+                }
+            }
+        } else {
+            System.err.println("Could not remove user. Server response: " + (response != null ? response.replace("REMOVE_FAIL ", "") : "No response."));
+        }
+    }
 
-    private String getFileListFromPeer(String peerAddress) {
+    private Map<String, String> listPeers() throws IOException {
+        serverTransport.sendLine("LIST_PEERS");
+        String response = serverTransport.readLine();
+        Map<String, String> onlinePeers = parsePeerInfoResponse(response);
+        onlinePeers.remove(loggedInUser.getUsername());
+        if (onlinePeers.isEmpty()) {
+            System.out.println("\nYou are the only peer online.");
+            return onlinePeers;
+        }
+        System.out.println("\n--- Online Peers ---");
+        System.out.printf("%-20s %s\n", "Username", "Peer Address");
+        System.out.println("-".repeat(42));
+        for (Map.Entry<String, String> entry : onlinePeers.entrySet()) {
+            String key = entry.getKey();
+            String value = entry.getValue();
+            System.out.printf("%-20s %s\n", key, value);
+        }
+        System.out.println("--------------------");
+        return onlinePeers;
+    }
+
+    private Map<String, String> parsePeerInfoResponse(String response) {
+        Map<String, String> peerInfoMap = new LinkedHashMap<>();
+        if (response == null || response.isEmpty()) return peerInfoMap;
+        String[] pairs = response.split(",");
+        for (String pair : pairs) {
+            String[] parts = pair.split("=", 2);
+            if (parts.length == 2) {
+                peerInfoMap.put(parts[0], parts[1]);
+            }
+        }
+        return peerInfoMap;
+    }
+
+    private List<String> getFileListFromPeer(String peerAddress) {
         try {
             String[] parts = peerAddress.split(":");
             String host = parts[0];
-            int tcpPort = Integer.parseInt(parts[1]);
-            int udpPort = tcpPort + 1;
-
-            try (UDPTransport transport = new UDPTransport(host, udpPort)) {
-                transport.setSoTimeout(3000);
-                transport.sendLine("LIST_FILES");
-                return transport.readLine();
+            int udpPort = Integer.parseInt(parts[1]) + 1;
+            try (UDPTransport peerTransport = new UDPTransport(host, udpPort)) {
+                peerTransport.setSoTimeout(3000);
+                peerTransport.sendLine("LIST_FILES");
+                String line = peerTransport.readLine();
+                if (line == null || line.trim().isEmpty()) return Collections.emptyList();
+                return Arrays.asList(line.split(","));
             }
+        } catch (SocketTimeoutException e) {
+            System.err.println("Could not get file list from " + peerAddress + ": Peer timed out.");
+            return null;
         } catch (IOException e) {
-            System.err.println("Failed to get file list from " + peerAddress + " via UDP: " + e.getMessage());
-            return "Error: " + e.getMessage();
+            System.err.println("Could not get file list from " + peerAddress + ": " + e.getMessage());
+            return null;
         }
     }
 
@@ -531,17 +504,19 @@ public class PeerClient {
         try {
             String[] parts = peerAddress.split(":");
             String host = parts[0];
-            int tcpPort = Integer.parseInt(parts[1]);
-            int udpPort = tcpPort + 1;
-
+            int udpPort = Integer.parseInt(parts[1]) + 1;
             try (UDPTransport transport = new UDPTransport(host, udpPort)) {
                 transport.setSoTimeout(3000);
                 transport.sendLine("FILESIZE " + fileName);
                 String response = transport.readLine();
-                return Long.parseLong(response);
+                if (response != null && !response.trim().isEmpty()) {
+                    return Long.parseLong(response.trim());
+                }
+                return -1;
             }
-        } catch (IOException | NumberFormatException e) {
-            System.err.println("Failed to get file size for '" + fileName + "' from " + peerAddress + " via UDP: " + e.getMessage());
+        } catch (NumberFormatException | SocketTimeoutException e) {
+            return -1;
+        } catch (IOException e) {
             return -1;
         }
     }
@@ -550,155 +525,57 @@ public class PeerClient {
         try {
             String[] parts = peerAddress.split(":");
             String host = parts[0];
-            int tcpPort = Integer.parseInt(parts[1]);
-            int udpPort = tcpPort + 1;
-
+            int udpPort = Integer.parseInt(parts[1]) + 1;
             try (UDPTransport transport = new UDPTransport(host, udpPort)) {
                 transport.setSoTimeout(3000);
                 transport.sendLine("GET_ZIP_COUNT " + fileName);
                 String response = transport.readLine();
-                return Integer.parseInt(response);
+                if (response != null && !response.trim().isEmpty()) return Integer.parseInt(response.trim());
+                return 0;
             }
-        } catch (IOException | NumberFormatException e) {
-            System.err.println("Failed to get zip count for '" + fileName + "' from " + peerAddress + " via UDP: " + e.getMessage());
-            return -1;
+        } catch (NumberFormatException | SocketTimeoutException e) {
+            System.err.println("Peer did not respond with zip count.");
+            return 0;
+        } catch (IOException e) {
+            System.err.println("Error querying peer for zip count: " + e.getMessage());
+            return 0;
         }
     }
 
-    private static class DownloadListener implements Runnable {
-        private final ServerSocket listenerSocket;
-        private final FileHandler fileHandler;
-        private final PeerClient peerClient;
-        private final Transport serverTransport;
-
-        public DownloadListener(ServerSocket socket, FileHandler fileHandler, PeerClient peerClient, Transport serverTransport) {
-            this.listenerSocket = socket;
-            this.fileHandler = fileHandler;
-            this.peerClient = peerClient;
-            this.serverTransport = serverTransport;
+    private String formatFileSize(long size) {
+        if (size <= 0) return "0 B";
+        final String[] units = {"B", "KB", "MB", "GB", "TB"};
+        int unitIndex = 0;
+        double displaySize = size;
+        while (displaySize >= 1024 && unitIndex < units.length - 1) {
+            displaySize /= 1024;
+            unitIndex++;
         }
+        return String.format(Locale.US, "%.1f %s", displaySize, units[unitIndex]);
+    }
 
-        @Override
-        public void run() {
-            System.out.println("TCP Download listener started on port " + listenerSocket.getLocalPort());
-            while (!Thread.currentThread().isInterrupted() && !listenerSocket.isClosed()) {
-                try {
-                    Socket peerConnection = listenerSocket.accept();
-                    new Thread(() -> handleDownloadRequest(peerConnection)).start();
-                } catch (IOException e) {
-                    if (listenerSocket.isClosed()) {
-                        System.out.println("Download listener shutting down.");
-                        break;
-                    }
-                    System.err.println("Error in download listener: " + e.getMessage());
-                }
-            }
-        }
+    private static int findAvailablePortPair() {
+        for (int port = 10000; port <= 11000; port++) if (arePortsAvailable(port, port + 1)) return port;
+        return -1;
+    }
 
-        private void handleDownloadRequest(Socket peerConnection) {
-            try (Transport transport = new TCPTransport(peerConnection)) {
-                String request = transport.readLine();
-                if (request != null && request.startsWith("DOWNLOAD ")) {
-                    String fileName = request.substring(9);
-                    if (fileHandler.fileExists(fileName)) {
-                        long fileSize = 0;
-                        try (InputStream fileIn = fileHandler.getInputStream(fileName)) {
-                            byte[] buffer = new byte[8192];
-                            int bytesRead;
-                            while ((bytesRead = fileIn.read(buffer)) != -1) {
-                                transport.sendBytes(buffer, bytesRead);
-                                fileSize += bytesRead;
-                            }
-                            if (peerClient.loggedInUser != null && fileSize > 0) {
-                                peerClient.loggedInUser.getUploadStats().addFile();
-                                peerClient.loggedInUser.getUploadStats().addBytes(fileSize);
-                                System.out.println("\n[Upload] Sent " + fileName + " (" + fileSize + " bytes)");
-                                System.out.print("> ");
-
-                                peerClient.sendStatsToServer(serverTransport);
-                            }
-                        }
-                    }
-                }
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
+    private static boolean arePortsAvailable(int tcpPort, int udpPort) {
+        try (ServerSocket tcpSocket = new ServerSocket(tcpPort); DatagramSocket udpSocket = new DatagramSocket(udpPort)) {
+            tcpSocket.setReuseAddress(true);
+            udpSocket.setReuseAddress(true);
+            return true;
+        } catch (IOException e) {
+            return false;
         }
     }
 
-    private class UDPRequestHandler implements Runnable {
-        private final DatagramSocket socket;
-        private final FileHandler fileHandler;
-        private volatile boolean running = true;
-
-        public UDPRequestHandler(int port, FileHandler fileHandler) throws IOException {
-            this.socket = new DatagramSocket(port);
-            this.fileHandler = fileHandler;
-        }
-
-        public void stop() {
-            running = false;
-            socket.close();
-        }
-
-        @Override
-        public void run() {
-            System.out.println("UDP Request Handler started on port " + socket.getLocalPort());
-            while (running) {
-                try {
-                    byte[] buffer = new byte[1024];
-                    DatagramPacket requestPacket = new DatagramPacket(buffer, buffer.length);
-                    socket.receive(requestPacket);
-
-                    String requestString = new String(requestPacket.getData(), 0, requestPacket.getLength());
-                    InetAddress clientAddress = requestPacket.getAddress();
-                    int clientPort = requestPacket.getPort();
-
-                    String responseString = processRequest(requestString);
-
-                    byte[] responseBytes = responseString.getBytes();
-                    DatagramPacket responsePacket = new DatagramPacket(responseBytes, responseBytes.length, clientAddress, clientPort);
-                    socket.send(responsePacket);
-
-                } catch (IOException e) {
-                    if (running) {
-                        System.err.println("Error in UDP Request Handler: " + e.getMessage());
-                    } else {
-                        System.out.println("UDP Request Handler shutting down.");
-                    }
-                }
-            }
-        }
-
-        private String processRequest(String request) {
-            if (request.equals("LIST_FILES")) {
-                return String.join(",", fileHandler.listSharedFiles());
-            } else if (request.startsWith("FILESIZE ")) {
-                String fileName = request.substring(9);
-                if (fileHandler.fileExists(fileName)) {
-                    try {
-                        Path filePath = ((LocalFileHandler) fileHandler).getSharedDirectory().resolve(fileName);
-                        return String.valueOf(Files.size(filePath));
-                    } catch (IOException e) {
-                        return "-1";
-                    }
-                }
-                return "-1";
-            } else if (request.startsWith("GET_ZIP_COUNT ")) {
-                String fileName = request.substring(14);
-                if (fileName.toLowerCase().endsWith(".zip") && fileHandler.fileExists(fileName)) {
-                    try {
-                        File file = ((LocalFileHandler) fileHandler).getSharedDirectory().resolve(fileName).toFile();
-                        try (ZipFile zipFile = new ZipFile(file)) {
-                            return String.valueOf(zipFile.size());
-                        }
-                    } catch (IOException e) {
-                        return "-1";
-                    }
-                }
-                return "-1";
-            }
-            return "ERROR: Unknown command";
+    private void updateRemoteStats() {
+        try {
+            String downloadStatsCsv = loggedInUser.getDownloadStats().toCsvString();
+            String uploadStatsCsv = loggedInUser.getUploadStats().toCsvString();
+            serverTransport.sendLine("UPDATE_STATS " + downloadStatsCsv + " " + uploadStatsCsv);
+        } catch (IOException e) {
+            System.err.println("Warning: Could not update stats with server: " + e.getMessage());
         }
     }
 
@@ -715,30 +592,150 @@ public class PeerClient {
         @Override
         public void run() {
             System.out.println("Directory watcher started for: " + path + " (polling every 3 seconds)");
-
             try {
                 while (!Thread.currentThread().isInterrupted()) {
-                    List<SharedFile> currentFilesOnDisk = ((LocalFileHandler) fileHandler).listSharedFileObjects();
-
-                    for (SharedFile sf : currentFilesOnDisk) {
-                        String fileName = sf.getName();
-                        if (knownSharedFiles.add(fileName)) {
-                            System.out.println("\n[Auto-Detector] New file found: " + sf.getFileInfo() + ". Sharing with network...");
-                            try {
-                                serverTransport.sendLine("SHARE " + fileName);
-                            } catch (IOException e) {
-                                System.err.println("Failed to auto-share file " + fileName + ": " + e.getMessage());
+                    try {
+                        for (String fileName : fileHandler.listSharedFiles()) {
+                            if (knownSharedFiles.add(fileName)) {
+                                System.out.println("\n[Auto-Detector] New file found: " + fileName + ". Sharing with network...");
+                                System.out.print("Choose an option: ");
+                                try {
+                                    synchronized (serverTransport) {
+                                        serverTransport.sendLine("SHARE " + fileName);
+                                    }
+                                } catch (IOException e) {
+                                    System.err.println("\nFailed to auto-share file " + fileName + ". The connection may be down.");
+                                    Thread.currentThread().interrupt();
+                                }
                             }
-                            System.out.print("> ");
                         }
+                    } catch (Exception e) {
+                        System.err.println("\nError reading shared directory in watcher: " + e.getMessage());
                     }
-
                     Thread.sleep(POLLING_INTERVAL_MS);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             } finally {
                 System.out.println("Directory watcher stopped.");
+            }
+        }
+    }
+
+    private class UdpRequestHandler implements Runnable {
+        private final int port;
+
+        public UdpRequestHandler(int port) {
+            this.port = port;
+        }
+
+        @Override
+        public void run() {
+            try (DatagramSocket socket = new DatagramSocket(port)) {
+                System.out.println("UDP Discovery Server listening on port " + port);
+                while (true) {
+                    try {
+                        byte[] receiveBuffer = new byte[1024];
+                        DatagramPacket receivePacket = new DatagramPacket(receiveBuffer, receiveBuffer.length);
+                        socket.receive(receivePacket);
+
+                        //Extract sender info
+                        InetAddress senderAddress = receivePacket.getAddress();
+                        int senderPort = receivePacket.getPort();
+                        String request = new String(receivePacket.getData(), 0, receivePacket.getLength(), "UTF-8");
+                        System.out.println("UDP Server received request: " + request);
+
+                        //creating response string here based on the request
+                        String responseString = "";
+                        if (request.equals("LIST_FILES")) {
+                            responseString = String.join(",", fileHandler.listSharedFiles());
+                        } else if (request.startsWith("FILESIZE ")) {
+                            String fileName = request.substring(9);
+                            Path filePath = ((LocalFileHandler) fileHandler).getSharedDirectory().resolve(fileName);
+                            responseString = String.valueOf(Files.exists(filePath) ? Files.size(filePath) : -1);
+                        } else if (request.startsWith("GET_ZIP_COUNT ")) {
+                            String requestedFileName = request.substring(14);
+                            Path sharedDir = ((LocalFileHandler) fileHandler).getSharedDirectory();
+                            Path requestedFilePath = sharedDir.resolve(requestedFileName);
+                            long zipFileCount = SharedFileFactory.getZipFileCount(requestedFilePath);
+                            responseString = String.valueOf(zipFileCount);
+                        }
+
+                        //instead of creating new socket reuse the existing one to send response
+                        if (!responseString.isEmpty()) {
+                            byte[] sendBuffer = responseString.getBytes("UTF-8");
+                            DatagramPacket sendPacket = new DatagramPacket(sendBuffer, sendBuffer.length, senderAddress, senderPort);
+                            socket.send(sendPacket);
+                        }
+
+                    } catch (IOException e) {
+                        // print eror if socket wasnt closed intentionally
+                        if (socket.isClosed()) {
+                            System.out.println("UDP listener shutting down.");
+                            break;
+                        }
+                        System.err.println("Error processing UDP request: " + e.getMessage());
+                    }
+                }
+            } catch (IOException e) {
+                System.err.println("FATAL: Failed to listen for UDP datagrams on port " + port + ": " + e.getMessage());
+            }
+        }
+    }
+
+
+    private class DownloadHandler implements Runnable {
+        private final Socket socket;
+
+        public DownloadHandler(Socket socket) {
+            this.socket = socket;
+        }
+
+        @Override
+        public void run() {
+            try (BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream())); OutputStream os = socket.getOutputStream();
+                 PrintWriter out = new PrintWriter(os, true)) {
+                String request = in.readLine();
+                if (request == null) return;
+                System.out.println("TCP Server received request: " + request + " from " + socket.getRemoteSocketAddress());
+                if (request.startsWith("DOWNLOAD ")) {
+                    String fileName = request.substring(9);
+                    long totalBytesSent = 0;
+                    try (InputStream fis = fileHandler.getInputStream(fileName)) {
+                        byte[] buffer = new byte[8192];
+                        int bytesRead;
+                        while ((bytesRead = fis.read(buffer)) != -1) {
+                            os.write(buffer, 0, bytesRead);
+                            totalBytesSent += bytesRead;
+                        }
+                    } catch (IOException e) {
+                        System.err.println("Error sending file " + fileName + ": " + e.getMessage());
+                    }
+                    if (totalBytesSent > 0) {
+                        loggedInUser.getUploadStats().addFile();
+                        loggedInUser.getUploadStats().addBytes(totalBytesSent);
+                        updateRemoteStats();
+                    }
+                } else if (request.startsWith("_KICK_ ")) {
+                    String kickedUser = request.substring(7);
+                    if (loggedInUser.getUsername().equals(kickedUser)) {
+                        out.println("OK_KICKED");
+                        System.out.println("\n!!! Received remote shutdown command from an administrator. Quitting now. !!!");
+                        System.exit(0);
+                    } else {
+                        out.println("ERROR_WRONG_USER");
+                    }
+                } else {
+                    out.println("ERROR Unknown command on TCP socket: " + request);
+                }
+            } catch (IOException e) {
+                System.err.println("Error in DownloadHandler: " + e.getMessage());
+            } finally {
+                try {
+                    socket.close();
+                } catch (IOException e) {
+                    // ignore
+                }
             }
         }
     }

@@ -1,29 +1,21 @@
 import java.io.*;
 import java.net.*;
-import java.nio.file.Files;
-import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.*;
+import java.util.concurrent.*;
 
-public class Server {
+public class Server{
 
     private static final int PORT = 9090;
-    private static final String OUTPUT_DIRECTORY = "out";
     private static final List<FileEntry> fileRegistry = new ArrayList<>();
     private static final List<PeerInfo> activePeers = new ArrayList<>();
-    private static final AccountService accountService = new AccountService(OUTPUT_DIRECTORY + "/users.csv");
-
-    private static final Map<String, ClientHandler> activeClients = new ConcurrentHashMap<>();
+    private static final AccountService accountService = new AccountService("users.csv");
 
     public static void main(String[] args) throws IOException {
-        Files.createDirectories(Paths.get(OUTPUT_DIRECTORY));
-        System.out.println("Simple Napster Server running on port " + PORT);
-        try (ServerSocket serverSocket = new ServerSocket(PORT)) {
+        System.out.println("Napster-style Server is running on port " + PORT);
+        ExecutorService pool = Executors.newCachedThreadPool();
+        try (ServerSocket listener = new ServerSocket(PORT)) {
             while (true) {
-                new Thread(new ClientHandler(serverSocket.accept())).start();
+                pool.execute(new ClientHandler(listener.accept()));
             }
         }
     }
@@ -79,49 +71,38 @@ public class Server {
             this.socket = socket;
         }
 
-        // Forcibly close client's socket
-        public void stopClient() {
-            try {
-                if (socket != null && !socket.isClosed()) {
-                    socket.close();
-                }
-            } catch (IOException e) {
-                System.err.println("Error closing socket for " + (loggedInUser != null ? loggedInUser.getUsername() : "a client") + ": " + e.getMessage());
-            }
-        }
-
-
         @Override
         public void run() {
-            String clientIdentifier = socket.getRemoteSocketAddress().toString();
-            System.out.println("Connected: " + clientIdentifier);
+            System.out.println("Connected: " + socket.getRemoteSocketAddress());
+            try (BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                 PrintWriter out = new PrintWriter(socket.getOutputStream(), true)) {
 
-            try (Transport transport = new TCPTransport(socket)) {
                 String command;
-                while ((command = transport.readLine()) != null) {
-                    if (loggedInUser != null) {
-                        clientIdentifier = loggedInUser.getUsername();
-                    }
+                while ((command = in.readLine()) != null) {
+                    String userIdentifier;
 
-                    String[] parts = command.split(" ", 2);
+                    if (loggedInUser != null) {
+                        userIdentifier = loggedInUser.getUsername();
+                    } else {
+                        userIdentifier = "unauthenticated session " + socket.getRemoteSocketAddress();
+                    }
+                    System.out.println("Received from " + userIdentifier + ": " + command);
+
+                    String[] parts = command.split(" ", 3);
                     String action = parts[0].toUpperCase();
 
                     switch (action) {
                         case "LOGIN":
-                            String[] loginParts = command.split(" ", 3);
-                            if (loginParts.length < 3) continue;
-                            handleLogin(loginParts[1], loginParts[2], transport);
+                            if (parts.length < 3) continue;
+                            handleLogin(parts[1], parts[2], out);
                             break;
-
                         case "SIGNUP":
-                            String[] signupParts = command.split(" ", 3);
-                            if (signupParts.length < 3) continue;
-                            handleSignUp(signupParts[1], signupParts[2], transport);
+                            if (parts.length < 3) continue;
+                            handleSignup(parts[1], parts[2], out);
                             break;
-
                         case "REGISTER":
                             if (loggedInUser == null) {
-                                transport.sendLine("ERROR Not logged in");
+                                out.println("ERROR Not logged in");
                                 continue;
                             }
                             if (parts.length < 2) continue;
@@ -129,7 +110,7 @@ public class Server {
                             break;
                         case "SHARE":
                             if (loggedInUser == null || peerInfo == null) {
-                                transport.sendLine("ERROR Not logged in or peer not registered");
+                                out.println("ERROR Not registered");
                                 continue;
                             }
                             if (parts.length < 2) continue;
@@ -137,70 +118,54 @@ public class Server {
                             break;
                         case "SEARCH":
                             if (loggedInUser == null) {
-                                transport.sendLine("ERROR Not logged in");
+                                out.println("ERROR Not logged in");
                                 continue;
                             }
                             if (parts.length < 2) continue;
-                            handleSearch(parts[1], transport);
+                            handleSearch(parts[1], out);
                             break;
                         case "LIST_PEERS":
                             if (loggedInUser == null) {
-                                transport.sendLine("ERROR Not logged in");
+                                out.println("ERROR Not logged in");
                                 continue;
                             }
-                            handleListPeers(transport);
+                            handleListPeers(out);
                             break;
-                        case "REMOVE_USER":
-                            if (loggedInUser == null) {
-                                transport.sendLine("ERROR Not logged in");
-                                continue;
-                            }
-                            if (!loggedInUser.isAdmin()) {
-                                transport.sendLine("ERROR Not authorized");
-                                continue;
-                            }
-                            if (parts.length < 2) continue;
-                            handleRemoveUser(parts[1], transport);
-                            break;
-                        case "UNREGISTER":
-                            if (loggedInUser != null) {
-                                try {
-                                    accountService.saveUserStats(loggedInUser);
-                                } catch (IOException e) {
-                                    System.err.println("Failed to save stats for user " + loggedInUser.getUsername() + ": " + e.getMessage());
-                                }
-                            }
-                            return;
                         case "UPDATE_STATS":
                             if (loggedInUser == null) {
+                                out.println("ERROR Not logged in");
+                                continue;
+                            }
+                            if (parts.length < 3) continue;
+                            handleUpdateStats(parts[1], parts[2]);
+                            break;
+                        case "REMOVE_USER":
+                            if (loggedInUser == null || !loggedInUser.isAdmin()) {
+                                out.println("ERROR Not authorized");
                                 continue;
                             }
                             if (parts.length < 2) continue;
-                            handleUpdateStats(parts[1]);
+                            handleRemoveUser(parts[1], out);
                             break;
+                        case "UNREGISTER":
+                            return;
                         default:
-                            transport.sendLine("ERROR Unknown command");
+                            out.println("ERROR Unknown command");
                     }
                 }
             } catch (IOException e) {
-                // Ignore "Socket closed" errors which are expected when kicking a user
-                if (!"Socket closed".equals(e.getMessage())) {
-                    System.err.println("Connection error with " + clientIdentifier + ": " + e.getMessage());
-                }
+                System.err.println("Connection error with " + socket.getRemoteSocketAddress() + ": " + e.getMessage());
             } finally {
                 unregisterPeer();
                 try {
-                    if (!socket.isClosed()) {
-                        socket.close();
-                    }
-                } catch (IOException e) {
-                    // Ignore
-                }
-                System.out.println("Disconnected: " + clientIdentifier);
+                    socket.close();
+                } catch (IOException e) { /* Ignore */ }
+                String username = (peerInfo != null) ? peerInfo.username : socket.getRemoteSocketAddress().toString();
+                System.out.println("Closed connection: " + username);
             }
         }
 
-        private void handleLogin(String username, String password, Transport transport) throws IOException {
+        private void handleLogin(String username, String password, PrintWriter out) {
             User user = accountService.login(username, password);
             if (user != null) {
                 this.loggedInUser = user;
@@ -210,148 +175,138 @@ public class Server {
                         user.getDownloadStats().toCsvString(),
                         user.getUploadStats().toCsvString()
                 );
-                transport.sendLine("LOGIN_SUCCESS " + payload);
+                out.println("LOGIN_SUCCESS " + payload);
                 System.out.println("User '" + username + "' logged in successfully.");
-
-                activeClients.put(username, this);
-
             } else {
-                transport.sendLine("LOGIN_FAIL Invalid username or password.");
+                out.println("LOGIN_FAIL Invalid username or password.");
                 System.out.println("Failed login attempt for user '" + username + "'.");
             }
         }
 
-        private void handleSignUp(String username, String password, Transport transport) throws IOException {
+        private void handleSignup(String username, String password, PrintWriter out) {
             try {
-                User newUser = accountService.createUser(username, password);
-                if (newUser != null) {
-                    transport.sendLine("SIGNUP_SUCCESS User created. Please login.");
-                    System.out.println("New user signed up: " + username);
-                }
+                accountService.createUser(username, password);
+                out.println("SIGNUP_SUCCESS");
+                System.out.println("New user '" + username + "' created.");
             } catch (IOException e) {
-                transport.sendLine("SIGNUP_FAIL " + e.getMessage());
-                System.err.println("Failed to create user '" + username + "': " + e.getMessage());
+                out.println("SIGNUP_FAIL " + e.getMessage());
+                System.err.println("Failed signup for user '" + username + "': " + e.getMessage());
             }
         }
 
-        private void handleRegisterPeer(String portStr) {
-            String peerAddr = socket.getInetAddress().getHostAddress() + ":" + portStr;
-            this.peerInfo = new PeerInfo(loggedInUser.getUsername(), peerAddr);
+        private void handleUpdateStats(String downloadStatsCsv, String uploadStatsCsv) {
+            try {
+                loggedInUser.getDownloadStats().fromCsvString(downloadStatsCsv);
+                loggedInUser.getUploadStats().fromCsvString(uploadStatsCsv);
+                accountService.saveUserStats(loggedInUser);
+            } catch (IOException e) {
+                System.err.println("Could not update stats for user " + loggedInUser.getUsername() + ": " + e.getMessage());
+            }
+        }
+
+        private void handleRemoveUser(String username, PrintWriter out) {
+            try {
+                if (accountService.removeUser(username)) {
+                    out.println("REMOVE_SUCCESS");
+                    System.out.println("Admin '" + loggedInUser.getUsername() + "' removed user '" + username + "'.");
+                } else {
+                    out.println("REMOVE_FAIL Could not remove user. They may not exist or are an admin.");
+                }
+            } catch (IOException e) {
+                out.println("REMOVE_FAIL " + e.getMessage());
+            }
+        }
+
+        private void handleRegisterPeer(String peerListenPort) {
+            int port = Integer.parseInt(peerListenPort);
+            String peerAddress = socket.getInetAddress().getHostAddress() + ":" + port;
+            this.peerInfo = new PeerInfo(loggedInUser.getUsername(), peerAddress);
             synchronized (activePeers) {
-                if (!activePeers.contains(peerInfo)) {
-                    activePeers.add(peerInfo);
-                    System.out.println("Peer registered: " + peerAddr + " for user: " + loggedInUser.getUsername());
+                if (!activePeers.contains(this.peerInfo)) {
+                    activePeers.add(this.peerInfo);
+                    System.out.println("Peer registered: " + peerAddress + " as user '" + loggedInUser.getUsername() + "'");
                 }
             }
         }
 
         private void handleShare(String fileName) {
+            if (peerInfo == null) return;
+
+            synchronized (fileRegistry) {
+                FileEntry entry = null;
+
+                for (FileEntry fe : fileRegistry) {
+                    if (fe.fileName.equals(fileName)) {
+                        entry = fe;
+                        break;
+                    }
+                }
+                if (entry == null) {
+                    entry = new FileEntry(fileName);
+                    fileRegistry.add(entry);
+                }
+
+                entry.addPeer(peerInfo);
+            }
+        }
+
+
+        private void handleSearch(String searchFile, PrintWriter out) {
+            StringBuilder response = new StringBuilder();
+
             synchronized (fileRegistry) {
                 FileEntry foundEntry = null;
 
-                for (FileEntry currentEntry : fileRegistry) {
-                    if (currentEntry.fileName.equals(fileName)) {
-                        foundEntry = currentEntry;
+                for (FileEntry entry : fileRegistry) {
+                    if (entry.fileName.equalsIgnoreCase(searchFile)) {
+                        foundEntry = entry;
                         break;
                     }
                 }
 
-                if (foundEntry == null) {
-                    FileEntry newEntry = new FileEntry(fileName);
-                    fileRegistry.add(newEntry);
-                    foundEntry = newEntry;
-                }
-
-                foundEntry.addPeer(peerInfo);
-                System.out.println("User '" + loggedInUser.getUsername() + "' is sharing: " + fileName);
-            }
-        }
-
-
-        private void handleSearch(String fileName, Transport transport) throws IOException {
-            StringBuilder sb = new StringBuilder();
-            synchronized (fileRegistry) {
-                for (FileEntry entry : fileRegistry) {
-                    if (entry.fileName.equalsIgnoreCase(fileName)) {
-                        for (PeerInfo peer : entry.peers) {
-                            if (!sb.isEmpty()) {
-                                sb.append(",");
-                            }
-                            sb.append(peer.address);
+                if (foundEntry != null) {
+                    for (PeerInfo pi : foundEntry.peers) {
+                        if (response.length() > 0) {
+                            response.append(",");
                         }
+                        response.append(pi.username).append("=").append(pi.address);
                     }
                 }
             }
-            transport.sendLine(sb.toString());
+            out.println(response);
         }
 
-        private void handleListPeers(Transport transport) throws IOException {
-            StringBuilder sb = new StringBuilder();
+
+        private void handleListPeers(PrintWriter out) {
+            StringBuilder response = new StringBuilder();
+
             synchronized (activePeers) {
-                for (int i = 0; i < activePeers.size(); i++) {
-                    sb.append(activePeers.get(i).address);
-                    if (i < activePeers.size() - 1) {
-                        sb.append(",");
+                for (PeerInfo pi : activePeers) {
+                    if (response.length() > 0) {
+                        response.append(",");
                     }
+                    response.append(pi.username).append("=").append(pi.address);
                 }
             }
-            transport.sendLine(sb.toString());
-        }
 
-        private void handleRemoveUser(String username, Transport transport) throws IOException {
-            // Forcibly disconnect the user if they are currently online
-            ClientHandler handlerToKick = activeClients.get(username);
-            if (handlerToKick != null) {
-                System.out.println("Kicking user '" + username + "'...");
-                handlerToKick.stopClient();
-                activeClients.remove(username); // Also remove from tracking map
-            }
-
-            try {
-                if (accountService.removeUser(username)) {
-                    transport.sendLine("REMOVE_SUCCESS " + username + " removed.");
-                    System.out.println("Admin '" + loggedInUser.getUsername() + "' removed user '" + username + "'");
-                } else {
-                    transport.sendLine("REMOVE_FAIL User not found or cannot be removed.");
-                }
-            } catch (IOException e) {
-                transport.sendLine("REMOVE_FAIL Error removing user: " + e.getMessage());
-                System.err.println("Error removing user '" + username + "': " + e.getMessage());
-            }
+            out.println(response);
         }
 
         private void unregisterPeer() {
             if (peerInfo != null) {
+                System.out.println("Unregistering peer: " + peerInfo.address + " ('" + peerInfo.username + "')");
+
                 synchronized (activePeers) {
                     activePeers.remove(peerInfo);
                 }
+
                 synchronized (fileRegistry) {
                     for (FileEntry entry : fileRegistry) {
                         entry.removePeer(peerInfo);
                     }
                 }
-                System.out.println("Peer unregistered: " + peerInfo.address);
-            }
-
-            if (loggedInUser != null) {
-                activeClients.remove(loggedInUser.getUsername());
             }
         }
 
-        private void handleUpdateStats(String statsData) {
-            try {
-                String[] statsParts = statsData.split(";");
-                if (statsParts.length == 2) {
-                    loggedInUser.getDownloadStats().fromCsvString(statsParts[0]);
-                    loggedInUser.getUploadStats().fromCsvString(statsParts[1]);
-                    accountService.saveUserStats(loggedInUser);
-                    System.out.println("Stats updated for user '" + loggedInUser.getUsername() + "': " + statsData);
-                } else {
-                    System.err.println("Invalid stats format from user '" + loggedInUser.getUsername() + "'");
-                }
-            } catch (Exception e) {
-                System.err.println("Error updating stats for user '" + loggedInUser.getUsername() + "': " + e.getMessage());
-            }
-        }
     }
 }
