@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 public class AccountService {
 
@@ -117,6 +118,32 @@ public class AccountService {
 
         if (users.remove(username) != null) {
             rewriteUserCsvFile();
+
+            try {
+                Path clientConfigPath = Paths.get("client_config.csv");
+                if (Files.exists(clientConfigPath)) {
+                    // After reading the entire file filter out the removed user's name and overwrite the file with only those who should be there
+                    List<String> updatedLines = new ArrayList<>();
+
+
+                    List<String> allLines = Files.readAllLines(clientConfigPath);
+                    for (String line : allLines) {
+                        if (!line.trim().startsWith(username + ",")) {
+                            updatedLines.add(line);
+                        }
+                    }
+
+
+
+                    // update the thing again overwriting it
+                    Files.write(clientConfigPath, updatedLines);
+                    System.out.println("Removed directory configuration for deleted user: " + username);
+                }
+            } catch (IOException e) {
+                // Log a warning without stoppinng the program
+                System.err.println("Warning: Could not remove directory config for user '" + username + "': " + e.getMessage());
+            }
+
             return true;
         }
 
@@ -131,6 +158,7 @@ public class AccountService {
         }
         return null;
     }
+
 
     private void rewriteUserCsvFile() throws IOException {
         Path tempFilePath = getTempCsvPath();
@@ -158,22 +186,24 @@ public class AccountService {
                 return;
             } catch (IOException e) {
                 lastException = e;
-                if (attempt == MAX_RETRIES) {
-                    break;
+
+
+                if (attempt < MAX_RETRIES) {
+                    System.err.printf("Warning: Failed to rewrite user CSV file, retrying (%d/%d)%n", attempt, MAX_RETRIES);
+                    try {
+                        Thread.sleep(RETRY_DELAY_MS * attempt);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("CSV file write was interrupted", ie);
+                    }
                 }
-                System.err.printf("Warning: Failed to rewrite user CSV file, retrying (%d/%d)%n", attempt, MAX_RETRIES);
-                try {
-                    Thread.sleep(RETRY_DELAY_MS * attempt);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    throw new IOException("CSV file write was interrupted", ie);
-                }
+
             }
         }
         // If all retries fail, throw the last exception caught
+
         throw lastException;
     }
-
     private Path getTempCsvPath() {
         Path parentDir = userCsvPath.getParent();
         String tempFileName = userCsvPath.getFileName().toString() + ".tmp";
