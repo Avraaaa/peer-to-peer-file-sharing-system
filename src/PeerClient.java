@@ -4,6 +4,7 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
+import javax.swing.SwingUtilities;
 
 public class PeerClient {
     private String serverHost;
@@ -200,7 +201,11 @@ public class PeerClient {
     }
 
     private void registerAndShareFiles() throws IOException {
-        for (String fileName : fileHandler.listSharedFiles()) {
+        List<String> files = fileHandler.listSharedFiles();
+        System.out.println("DEBUG: Sharing " + files.size() + " files");
+
+        for (String fileName : files) {
+            System.out.println("DEBUG: Sharing file: " + fileName);
             serverTransport.sendLine("SHARE " + fileName);
             knownSharedFiles.add(fileName);
         }
@@ -738,5 +743,117 @@ public class PeerClient {
                 }
             }
         }
+    }
+
+    /*
+     * These methods enable UI integration without console input
+     */
+
+    public void startWithoutConsoleInput(String sharedDirectoryPath) throws IOException {
+        System.out.println("DEBUG: Registering peer on port " + myListenPort);
+        serverTransport.sendLine("REGISTER " + myListenPort);
+        try {
+            Thread.sleep(100);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
+        registerAndShareFiles();
+
+        Path sharedPath = Paths.get(sharedDirectoryPath);
+        directoryWatcherThread = new Thread(new DirectoryWatcher(sharedPath, serverTransport));
+        directoryWatcherThread.setDaemon(true);
+        directoryWatcherThread.start();
+
+        // Start TCP server for downloads
+        Thread tcpServerThread = new Thread(() -> {
+            try (ServerSocket serverSocket = new ServerSocket(myListenPort)) {
+                System.out.println("TCP Download Server listening on port " + myListenPort);
+
+                while (!Thread.currentThread().isInterrupted()) {
+                    Socket clientSocket = serverSocket.accept();
+                    new Thread(new DownloadHandler(clientSocket)).start();
+                }
+            } catch (IOException e) {
+                if (!Thread.currentThread().isInterrupted()) {
+                    System.err.println("TCP server error: " + e.getMessage());
+                }
+            }
+        });
+        tcpServerThread.setDaemon(true);
+        tcpServerThread.start();
+
+        // Start UDP server for peer communication
+        Thread udpServerThread = new Thread(new UdpRequestHandler(myUdpPort));
+        udpServerThread.setDaemon(true);
+        udpServerThread.start();
+
+        System.out.println("DEBUG: Peer client fully initialized");
+    }
+
+    //  getter for download strategy
+    public DownloadStrategy getDownloadStrategy() {
+        return downloadStrategy;
+    }
+
+    // getter for file handler
+    public FileHandler getFileHandler() {
+        return fileHandler;
+    }
+
+    // method to get server transport
+    public Transport getServerTransport() {
+        return serverTransport;
+    }
+
+    // method for UI to search files
+    public void searchFilesUI(String fileName, SearchCallback callback) {
+        Thread searchThread = new Thread(() -> {
+            try {
+                serverTransport.sendLine("SEARCH " + fileName);
+                String response = serverTransport.readLine();
+
+                SwingUtilities.invokeLater(() -> {
+                    callback.onSearchComplete(response);
+                });
+
+            } catch (IOException e) {
+                SwingUtilities.invokeLater(() -> {
+                    callback.onSearchError("Search failed: " + e.getMessage());
+                });
+            }
+        });
+        searchThread.start();
+    }
+
+    // method for UI to list peers
+    public void listPeersUI(PeerListCallback callback) {
+        Thread listThread = new Thread(() -> {
+            try {
+                serverTransport.sendLine("LIST_PEERS");
+                String response = serverTransport.readLine();
+
+                SwingUtilities.invokeLater(() -> {
+                    callback.onPeerListReceived(response);
+                });
+
+            } catch (IOException e) {
+                SwingUtilities.invokeLater(() -> {
+                    callback.onPeerListError("Failed to get peer list: " + e.getMessage());
+                });
+            }
+        });
+        listThread.start();
+    }
+
+    // Callback interfaces
+    public interface SearchCallback {
+        void onSearchComplete(String results);
+        void onSearchError(String error);
+    }
+
+    public interface PeerListCallback {
+        void onPeerListReceived(String peerList);
+        void onPeerListError(String error);
     }
 }
