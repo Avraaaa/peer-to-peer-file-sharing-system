@@ -143,6 +143,13 @@ public class WelcomeFrame extends JFrame {
         forgotPasswordLabel.setCursor(new Cursor(Cursor.HAND_CURSOR));
         forgotPasswordLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
 
+        forgotPasswordLabel.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override
+            public void mouseClicked(java.awt.event.MouseEvent e) {
+                handleForgotPassword();
+            }
+        });
+
         // Add components
         loginPanel.add(usernameLabel);
         loginPanel.add(Box.createVerticalStrut(5));
@@ -351,7 +358,177 @@ public class WelcomeFrame extends JFrame {
         loginButton.addActionListener(e -> handleLogin());
         signupButton.addActionListener(e -> handleSignup());
     }
+    private void handleForgotPassword() {
+        if (serverTransport == null) {
+            showError("Not connected to server");
+            return;
+        }
 
+        // Create forgot password dialog with proper sizing
+        JDialog forgotDialog = new JDialog(this, "Reset Password", true);
+        forgotDialog.setSize(450, 400); // Increased height from 300 to 400
+        forgotDialog.setLocationRelativeTo(this);
+        forgotDialog.setResizable(false);
+
+        JPanel mainPanel = new JPanel();
+        mainPanel.setLayout(new BoxLayout(mainPanel, BoxLayout.Y_AXIS));
+        mainPanel.setBorder(new EmptyBorder(20, 20, 20, 20));
+        mainPanel.setBackground(Color.WHITE);
+
+        // Title
+        JLabel titleLabel = new JLabel("Reset Your Password");
+        titleLabel.setFont(new Font("Arial", Font.BOLD, 18));
+        titleLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        // Instructions
+        JLabel instructionLabel = new JLabel("<html><center>Enter your username to reset your password.<br>You will be able to set a new password.</center></html>");
+        instructionLabel.setFont(new Font("Arial", Font.PLAIN, 12));
+        instructionLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+        instructionLabel.setBorder(new EmptyBorder(10, 0, 20, 0));
+
+        // Username field
+        JLabel usernameLabel = new JLabel("Username:");
+        usernameLabel.setFont(new Font("Arial", Font.BOLD, 12));
+        usernameLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JTextField usernameField = createStyledTextField();
+        usernameField.setMaximumSize(new Dimension(Integer.MAX_VALUE, 35));
+        usernameField.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        // New password field
+        JLabel newPasswordLabel = new JLabel("New Password:");
+        newPasswordLabel.setFont(new Font("Arial", Font.BOLD, 12));
+        newPasswordLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JPasswordField newPasswordField = createStyledPasswordField();
+        newPasswordField.setMaximumSize(new Dimension(Integer.MAX_VALUE, 35));
+        newPasswordField.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        // Confirm password field
+        JLabel confirmPasswordLabel = new JLabel("Confirm New Password:");
+        confirmPasswordLabel.setFont(new Font("Arial", Font.BOLD, 12));
+        confirmPasswordLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JPasswordField confirmPasswordField = createStyledPasswordField();
+        confirmPasswordField.setMaximumSize(new Dimension(Integer.MAX_VALUE, 35));
+        confirmPasswordField.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        // Buttons
+        JPanel buttonPanel = new JPanel(new FlowLayout());
+        buttonPanel.setBackground(Color.WHITE);
+        buttonPanel.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        JButton resetButton = createStyledButton("Reset Password", new Color(34, 197, 94));
+        JButton cancelButton = createStyledButton("Cancel", new Color(107, 114, 128));
+
+        buttonPanel.add(cancelButton);
+        buttonPanel.add(resetButton);
+
+        // Add components with proper spacing
+        mainPanel.add(titleLabel);
+        mainPanel.add(instructionLabel);
+
+        mainPanel.add(usernameLabel);
+        mainPanel.add(Box.createVerticalStrut(5));
+        mainPanel.add(usernameField);
+        mainPanel.add(Box.createVerticalStrut(15));
+
+        mainPanel.add(newPasswordLabel);
+        mainPanel.add(Box.createVerticalStrut(5));
+        mainPanel.add(newPasswordField);
+        mainPanel.add(Box.createVerticalStrut(15));
+
+        mainPanel.add(confirmPasswordLabel);
+        mainPanel.add(Box.createVerticalStrut(5));
+        mainPanel.add(confirmPasswordField);
+        mainPanel.add(Box.createVerticalStrut(20));
+
+        mainPanel.add(buttonPanel);
+
+        forgotDialog.add(mainPanel);
+
+        // Event handlers
+        cancelButton.addActionListener(e -> forgotDialog.dispose());
+
+        resetButton.addActionListener(e -> {
+            String username = usernameField.getText().trim();
+            String newPassword = new String(newPasswordField.getPassword());
+            String confirmPassword = new String(confirmPasswordField.getPassword());
+
+            if (username.isEmpty()) {
+                showError("Please enter your username");
+                return;
+            }
+
+            if (newPassword.isEmpty() || confirmPassword.isEmpty()) {
+                showError("Please fill in both password fields");
+                return;
+            }
+
+            if (!newPassword.equals(confirmPassword)) {
+                showError("Passwords do not match");
+                return;
+            }
+
+            if (newPassword.length() < 4) {
+                showError("Password must be at least 4 characters long");
+                return;
+            }
+
+            // Disable button during processing
+            resetButton.setEnabled(false);
+            resetButton.setText("Resetting...");
+
+            SwingWorker<Boolean, Void> resetWorker = new SwingWorker<Boolean, Void>() {
+                @Override
+                protected Boolean doInBackground() throws Exception {
+                    try {
+                        // Send reset password command
+                        serverTransport.sendLine("RESET_PASSWORD " + username + " " + newPassword);
+                        String response = serverTransport.readLine();
+                        return "RESET_SUCCESS".equals(response);
+                    } catch (Exception ex) {
+                        throw ex;
+                    }
+                }
+
+                @Override
+                protected void done() {
+                    try {
+                        boolean success = get();
+                        forgotDialog.dispose();
+
+                        if (success) {
+                            JOptionPane.showMessageDialog(WelcomeFrame.this,
+                                    "Password reset successfully!\nYou can now login with your new password.",
+                                    "Password Reset",
+                                    JOptionPane.INFORMATION_MESSAGE);
+
+                            // Pre-fill username in login form
+                            loginUsernameField.setText(username);
+                            tabbedPane.setSelectedIndex(0); // Switch to login tab
+                        } else {
+                            showError("Password reset failed. Please check if the username exists.");
+                        }
+                    } catch (Exception ex) {
+                        showError("Password reset failed: " + ex.getMessage());
+                    } finally {
+                        resetButton.setEnabled(true);
+                        resetButton.setText("Reset Password");
+                    }
+                }
+            };
+
+            resetWorker.execute();
+        });
+
+        //Enter key support for fields
+        usernameField.addActionListener(e -> newPasswordField.requestFocus());
+        newPasswordField.addActionListener(e -> confirmPasswordField.requestFocus());
+        confirmPasswordField.addActionListener(e -> resetButton.doClick());
+
+        forgotDialog.setVisible(true);
+    }
     private void validateLoginForm() {
         boolean valid = !loginUsernameField.getText().trim().isEmpty() &&
                 loginPasswordField.getPassword().length > 0;
@@ -525,8 +702,6 @@ public class WelcomeFrame extends JFrame {
             protected void done() {
                 try {
                     User user = get();
-
-                    // Show first-time setup if needed
                     FirstTimeSetupDialog setupDialog = new FirstTimeSetupDialog(WelcomeFrame.this, user);
                     String sharedDirectory = setupDialog.getSharedDirectory();
 
