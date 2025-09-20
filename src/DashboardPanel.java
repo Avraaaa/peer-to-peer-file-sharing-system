@@ -187,7 +187,6 @@ public class DashboardPanel extends JPanel {
         // Bottom section with activity and network status
         JPanel bottomSection = new JPanel(new GridLayout(1, 2, 20, 0));
         bottomSection.setBackground(new Color(248, 250, 252));
-        bottomSection.add(recentActivityPanel);
         bottomSection.add(networkStatusPanel);
 
         mainContent.add(bottomSection, BorderLayout.SOUTH);
@@ -227,9 +226,6 @@ public class DashboardPanel extends JPanel {
     public void refreshData() {
         // Update statistics cards
         updateStatsCards();
-
-        // Update recent activity
-        updateRecentActivity();
 
         // Update network status
         updateNetworkStatus();
@@ -371,3 +367,4 @@ public class DashboardPanel extends JPanel {
     }
 
 }
+
