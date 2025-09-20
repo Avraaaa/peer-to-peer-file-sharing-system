@@ -12,15 +12,13 @@ public class DashboardPanel extends JPanel {
 
     // Dashboard components
     private JPanel statsCardsPanel;
-    private JPanel recentActivityPanel;
     private JPanel quickActionsPanel;
     private JPanel networkStatusPanel;
 
     // Stats cards
     private StatCard filesSharedCard;
     private StatCard dataTransferredCard;
-    private StatCard activeConnectionsCard;
-    private StatCard recentActivityCard;
+
 
     // Activity list
     private DefaultListModel<String> activityListModel;
@@ -46,7 +44,6 @@ public class DashboardPanel extends JPanel {
         createHeader();
         createStatsCards();
         createQuickActions();
-        createRecentActivity();
         createNetworkStatus();
     }
 
@@ -89,13 +86,10 @@ public class DashboardPanel extends JPanel {
         // Initialize stat cards
         filesSharedCard = new StatCard("Files Shared", "0", new Color(59, 130, 246), "📁");
         dataTransferredCard = new StatCard("Data Transferred", "0 B", new Color(34, 197, 94), "📊");
-        activeConnectionsCard = new StatCard("Active Connections", "0", new Color(168, 85, 247), "🌐");
-        recentActivityCard = new StatCard("Recent Activity", "0", new Color(245, 158, 11), "⚡");
 
         statsCardsPanel.add(filesSharedCard);
         statsCardsPanel.add(dataTransferredCard);
-        statsCardsPanel.add(activeConnectionsCard);
-        statsCardsPanel.add(recentActivityCard);
+      
     }
 
     private void createQuickActions() {
@@ -127,33 +121,6 @@ public class DashboardPanel extends JPanel {
         quickActionsPanel.add(helpBtn);
     }
 
-    private void createRecentActivity() {
-        recentActivityPanel = new JPanel(new BorderLayout());
-        recentActivityPanel.setBackground(Color.WHITE);
-        recentActivityPanel.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(new Color(229, 231, 235), 1),
-                new EmptyBorder(20, 20, 20, 20)
-        ));
-        recentActivityPanel.setPreferredSize(new Dimension(0, 200));
-
-        JLabel activityTitle = new JLabel("Recent Activity");
-        activityTitle.setFont(new Font("Arial", Font.BOLD, 18));
-        activityTitle.setForeground(new Color(30, 41, 59));
-
-        activityListModel = new DefaultListModel<>();
-        activityList = new JList<>(activityListModel);
-        activityList.setFont(new Font("Arial", Font.PLAIN, 12));
-        activityList.setCellRenderer(new ActivityListCellRenderer());
-        activityList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-
-        JScrollPane scrollPane = new JScrollPane(activityList);
-        scrollPane.setBorder(BorderFactory.createLineBorder(new Color(229, 231, 235), 1));
-        scrollPane.setPreferredSize(new Dimension(0, 140));
-
-        recentActivityPanel.add(activityTitle, BorderLayout.NORTH);
-        recentActivityPanel.add(Box.createVerticalStrut(15), BorderLayout.CENTER);
-        recentActivityPanel.add(scrollPane, BorderLayout.SOUTH);
-    }
 
     private void createNetworkStatus() {
         networkStatusPanel = new JPanel(new BorderLayout());
@@ -281,9 +248,7 @@ public class DashboardPanel extends JPanel {
                 SwingUtilities.invokeLater(() -> {
                     filesSharedCard.updateValue(String.valueOf(filesCount));
                     dataTransferredCard.updateValue(formatFileSize(totalBytes));
-                    // activeConnectionsCard and recentActivityCard would need peer data
-                    activeConnectionsCard.updateValue("1");
-                    recentActivityCard.updateValue("5");
+                    
                 });
 
                 return null;
@@ -293,22 +258,6 @@ public class DashboardPanel extends JPanel {
         updateWorker.execute();
     }
 
-    private void updateRecentActivity() {
-        SwingUtilities.invokeLater(() -> {
-            activityListModel.clear();
-
-            // Add sample activity entries
-            activityListModel.addElement("Downloaded: document.pdf (2.3 MB)");
-            activityListModel.addElement("Shared: presentation.pptx");
-            activityListModel.addElement("Connected to peer: user123");
-            activityListModel.addElement("Upload completed: video.mp4 (15.7 MB)");
-            activityListModel.addElement("New file detected: report.docx");
-
-            if (activityListModel.isEmpty()) {
-                activityListModel.addElement("No recent activity");
-            }
-        });
-    }
 
     private void updateNetworkStatus() {
         // This would typically query the peer client for network information
@@ -420,4 +369,5 @@ public class DashboardPanel extends JPanel {
             return this;
         }
     }
+
 }
