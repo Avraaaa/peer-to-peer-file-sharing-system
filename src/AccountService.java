@@ -46,7 +46,8 @@ public class AccountService {
             }
         } catch (IOException e) {
             System.err.println("FATAL Error: Could not read user CSV file at " + userCsvPath + ": " + e.getMessage());
-            users.putIfAbsent("admin", createAdminWithStats());
+            AdminUse adminUser = createAdminWithStats();
+            users.put("admin", adminUser);  
             return;
         }
 
@@ -102,7 +103,8 @@ public class AccountService {
                 System.err.println("Warning: Corrupt line in user CSV file, skipping: " + line);
             }
         }
-        users.putIfAbsent("admin", createAdminWithStats());
+        AdminUser adminUser = createAdminWithStats();
+        users.put("admin", adminUser);
     }
     private AdminUser createAdminWithStats() {
         DownloadStats downloadStats = new DownloadStats();
