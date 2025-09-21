@@ -147,6 +147,23 @@ public class Server{
                             if (parts.length < 2) continue;
                             handleRemoveUser(parts[1], out);
                             break;
+                        case "CHANGE_PASSWORD":
+                            if (loggedInUser == null) {
+                                out.println("ERROR Not logged in");
+                                continue;
+                            }
+                            if (parts.length < 3) continue;
+                            handleChangePassword(parts[1], parts[2], out);
+                            break;
+
+                        case "DELETE_ACCOUNT":
+                            if (loggedInUser == null) {
+                                out.println("ERROR Not logged in");
+                                continue;
+                            }
+                            if (parts.length < 3) continue;
+                            handleDeleteAccount(parts[1], parts[2], out);
+                            break;
                         case "UNREGISTER":
                             return;
                         default:
@@ -230,7 +247,12 @@ public class Server{
         }
 
         private void handleShare(String fileName) {
-            if (peerInfo == null) return;
+            if (peerInfo == null) {
+                System.out.println("DEBUG: handleShare called but peerInfo is null for file: " + fileName);
+                return;
+            }
+
+            System.out.println("DEBUG: Sharing file '" + fileName + "' from peer " + peerInfo.username + " at " + peerInfo.address);
 
             synchronized (fileRegistry) {
                 FileEntry entry = null;
@@ -241,42 +263,186 @@ public class Server{
                         break;
                     }
                 }
+
                 if (entry == null) {
                     entry = new FileEntry(fileName);
                     fileRegistry.add(entry);
+                    System.out.println("DEBUG: Created new FileEntry for: " + fileName);
+                } else {
+                    System.out.println("DEBUG: Found existing FileEntry for: " + fileName);
                 }
 
                 entry.addPeer(peerInfo);
+                System.out.println("DEBUG: Added peer " + peerInfo.username + " to file " + fileName);
+                System.out.println("DEBUG: File " + fileName + " now has " + entry.peers.size() + " peer(s)");
+                System.out.println("DEBUG: Total files in registry: " + fileRegistry.size());
             }
         }
 
 
-        private void handleSearch(String searchFile, PrintWriter out) {
+        private void handleSearch(String searchTerm, PrintWriter out) {
             StringBuilder response = new StringBuilder();
+            Map<String, Set<PeerInfo>> matchingFiles = new LinkedHashMap<>();
+
+            // Convert search term to lowercase for case-insensitive matching
+            String lowerSearchTerm = searchTerm.toLowerCase().trim();
+
+            System.out.println("DEBUG: Searching for: '" + searchTerm + "' (normalized: '" + lowerSearchTerm + "')");
 
             synchronized (fileRegistry) {
-                FileEntry foundEntry = null;
+                System.out.println("DEBUG: Total files in registry: " + fileRegistry.size());
 
+                // Find all files that match the search criteria
                 for (FileEntry entry : fileRegistry) {
-                    if (entry.fileName.equalsIgnoreCase(searchFile)) {
-                        foundEntry = entry;
-                        break;
-                    }
-                }
+                    String fileName = entry.fileName;
+                    String lowerFileName = fileName.toLowerCase();
 
-                if (foundEntry != null) {
-                    for (PeerInfo pi : foundEntry.peers) {
-                        if (response.length() > 0) {
-                            response.append(",");
+                    System.out.println("DEBUG: Checking file: '" + fileName + "' against '" + lowerSearchTerm + "'");
+
+                    boolean matches = false;
+
+                    // Method 1: Direct substring match (for partial names)
+                    if (lowerFileName.contains(lowerSearchTerm)) {
+                        matches = true;
+                        System.out.println("DEBUG: Matched by substring");
+                    }
+
+                    // Method 2: File extension match (if search starts with .)
+                    else if (lowerSearchTerm.startsWith(".")) {
+                        if (lowerFileName.endsWith(lowerSearchTerm)) {
+                            matches = true;
+                            System.out.println("DEBUG: Matched by extension");
                         }
-                        response.append(pi.username).append("=").append(pi.address);
+                    }
+
+                    // Method 3: Extension match without dot (e.g., "mp3" matches ".mp3" files)
+                    else {
+                        String searchAsExtension = "." + lowerSearchTerm;
+                        if (lowerFileName.endsWith(searchAsExtension)) {
+                            matches = true;
+                            System.out.println("DEBUG: Matched by extension (without dot)");
+                        }
+                    }
+
+                    // Method 4: Word boundary matching (for better partial matches)
+                    if (!matches) {
+                        String[] searchWords = lowerSearchTerm.split("\\s+");
+                        boolean allWordsMatch = true;
+                        for (String word : searchWords) {
+                            if (!lowerFileName.contains(word)) {
+                                allWordsMatch = false;
+                                break;
+                            }
+                        }
+                        if (allWordsMatch && searchWords.length > 0) {
+                            matches = true;
+                            System.out.println("DEBUG: Matched by word boundary");
+                        }
+                    }
+
+                    if (matches && !entry.peers.isEmpty()) {
+                        // Only include files that have active peers
+                        matchingFiles.computeIfAbsent(fileName, k -> new LinkedHashSet<>())
+                                .addAll(entry.peers);
+                        System.out.println("DEBUG: Added file '" + fileName + "' with " + entry.peers.size() + " peers");
                     }
                 }
             }
-            out.println(response);
+
+            // Build response in format: filename1=peer1:address1,peer2:address2;filename2=peer3:address3
+            boolean first = true;
+            for (Map.Entry<String, Set<PeerInfo>> entry : matchingFiles.entrySet()) {
+                if (!first) {
+                    response.append(";");
+                }
+                first = false;
+
+                response.append(entry.getKey()).append("=");
+
+                boolean firstPeer = true;
+                for (PeerInfo peer : entry.getValue()) {
+                    if (!firstPeer) {
+                        response.append(",");
+                    }
+                    firstPeer = false;
+                    response.append(peer.username).append(":").append(peer.address);
+                }
+            }
+
+            String finalResponse = response.toString();
+
+            // Debug output
+            System.out.println("DEBUG: Search for '" + searchTerm + "' found " + matchingFiles.size() + " files");
+            System.out.println("DEBUG: Server sending response: '" + finalResponse + "'");
+
+            out.println(finalResponse);
+
+            // Log the search
+            System.out.println("User '" + loggedInUser.getUsername() + "' searched for '" +
+                    searchTerm + "' - found " + matchingFiles.size() + " matching files");
         }
 
+        private void handleChangePassword(String currentPassword, String newPassword, PrintWriter out) {
+            try {
+                // Get the user's stored password hash and verify current password
+                String storedHash = loggedInUser.getPasswordHash();
+                if (!accountService.verifyPassword(currentPassword, storedHash)) {
+                    out.println("CHANGE_PASSWORD_FAIL Current password is incorrect");
+                    System.out.println("Password change failed for user '" + loggedInUser.getUsername() + "': incorrect current password");
+                    return;
+                }
 
+                // Change password
+                if (accountService.changePassword(loggedInUser.getUsername(), newPassword)) {
+                    out.println("CHANGE_PASSWORD_SUCCESS");
+                    System.out.println("User '" + loggedInUser.getUsername() + "' changed their password successfully");
+                } else {
+                    out.println("CHANGE_PASSWORD_FAIL Could not update password");
+                }
+            } catch (IOException e) {
+                out.println("CHANGE_PASSWORD_FAIL " + e.getMessage());
+                System.err.println("Error changing password for user " + loggedInUser.getUsername() + ": " + e.getMessage());
+            }
+        }
+
+        private void handleDeleteAccount(String username, String password, PrintWriter out) {
+            try {
+                // Verify it's the same user
+                if (!loggedInUser.getUsername().equals(username)) {
+                    out.println("DELETE_ACCOUNT_FAIL Username mismatch");
+                    return;
+                }
+
+                // Get the user's stored password hash and verify password
+                String storedHash = loggedInUser.getPasswordHash();
+                if (!accountService.verifyPassword(password, storedHash)) {
+                    out.println("DELETE_ACCOUNT_FAIL Incorrect password");
+                    System.out.println("Account deletion failed for user '" + username + "': incorrect password");
+                    return;
+                }
+
+                // Don't allow admin to delete themselves if they're the only admin
+                if (loggedInUser.isAdmin() && accountService.isOnlyAdmin(username)) {
+                    out.println("DELETE_ACCOUNT_FAIL Cannot delete the only admin account");
+                    return;
+                }
+
+                // Delete account
+                if (accountService.removeUser(username)) {
+                    out.println("DELETE_ACCOUNT_SUCCESS");
+                    System.out.println("User '" + username + "' deleted their own account");
+
+                    // Force disconnect after successful deletion
+                    unregisterPeer();
+                    return; // This will close the connection
+                } else {
+                    out.println("DELETE_ACCOUNT_FAIL Could not delete account");
+                }
+            } catch (IOException e) {
+                out.println("DELETE_ACCOUNT_FAIL " + e.getMessage());
+                System.err.println("Error deleting account for user " + username + ": " + e.getMessage());
+            }
+        }
         private void handleListPeers(PrintWriter out) {
             StringBuilder response = new StringBuilder();
 
@@ -307,6 +473,5 @@ public class Server{
                 }
             }
         }
-
-    }
+     }
 }
