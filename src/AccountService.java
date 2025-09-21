@@ -46,7 +46,7 @@ public class AccountService {
             }
         } catch (IOException e) {
             System.err.println("FATAL Error: Could not read user CSV file at " + userCsvPath + ": " + e.getMessage());
-            AdminUse adminUser = createAdminWithStats();
+            AdminUser adminUser = createAdminWithStats();
             users.put("admin", adminUser);  
             return;
         }
@@ -58,11 +58,11 @@ public class AccountService {
             if (parts.length >= 6) {
                 String username = parts[0];
                 String passwordHash = parts[1];
-                // Skip isAdmin field at parts[2] for regular users
+                // Parts[2] not required for non admins
 
                 User user = new RegularUser(username, passwordHash);
 
-                // Parse download stats (parts[3] and parts[4])
+                // Download stats parts[3] and parts[4]
                 if (parts.length >= 5) {
                     try {
                         user.getDownloadStats().fromCsvString(parts[3] + "," + parts[4]);
@@ -71,7 +71,7 @@ public class AccountService {
                     }
                 }
 
-                // Parse upload stats (parts[5] and parts[6])
+                // upload stats (parts[5] and parts[6])
                 if (parts.length >= 7) {
                     try {
                         user.getUploadStats().fromCsvString(parts[5] + "," + parts[6]);
@@ -160,7 +160,7 @@ public class AccountService {
             try {
                 Path clientConfigPath = Paths.get("client_config.csv");
                 if (Files.exists(clientConfigPath)) {
-                    // After reading the entire file filter out the removed user's name and overwrite the file with only those who should be there
+                    // Read the entire file and put everything other than the removedUser  on the arraylist and then overwrite
                     List<String> updatedLines = new ArrayList<>();
 
 
@@ -171,14 +171,10 @@ public class AccountService {
                         }
                     }
 
-
-
-                    // update the thing again overwriting it
                     Files.write(clientConfigPath, updatedLines);
                     System.out.println("Removed directory configuration for deleted user: " + username);
                 }
             } catch (IOException e) {
-                // Log a warning without stoppinng the program
                 System.err.println("Warning: Could not remove directory config for user '" + username + "': " + e.getMessage());
             }
 
@@ -202,7 +198,6 @@ public class AccountService {
         Path tempFilePath = getTempCsvPath();
         List<String> lines = new ArrayList<>();
         lines.add("username,passwordHash,downloadStats,uploadStats");
-        // Iterate through the updated 'users' map
         for (User user : users.values()) {
             if (!user.isAdmin()) {
                 lines.add(String.join(",",
@@ -308,7 +303,6 @@ public class AccountService {
             return false;
         }
 
-        // Count total admins
         long adminCount = users.values().stream()
                 .filter(User::isAdmin)
                 .count();
@@ -321,7 +315,6 @@ public class AccountService {
             return false;
         }
 
-        // new user object with updated password hash
         String newHashedPassword = hashPassword(newPassword);
 
         User updatedUser;
@@ -331,10 +324,8 @@ public class AccountService {
             updatedUser = new RegularUser(username, newHashedPassword, user.getDownloadStats(), user.getUploadStats());
         }
 
-        // Replace user in memory
         users.put(username, updatedUser);
 
-        // Save to file
         rewriteUserCsvFile();
         return true;
     }

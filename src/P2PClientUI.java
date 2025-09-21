@@ -989,26 +989,59 @@ public class P2PClientUI extends JFrame {
             if (confirm == JOptionPane.YES_OPTION) {
                 executorService.submit(() -> {
                     try {
+                        // 1. Send remove command to server
                         serverTransport.sendLine("REMOVE_USER " + usernameToRemove);
                         String response = serverTransport.readLine();
 
-                        SwingUtilities.invokeLater(() -> {
-                            if ("REMOVE_SUCCESS".equals(response)) {
-                                JOptionPane.showMessageDialog(dialog,
-                                        "User '" + usernameToRemove + "' has been removed successfully");
-                                dialog.dispose();
-                            } else {
-                                String errorMsg = response != null ? response.replace("REMOVE_FAIL ", "") : "No response";
-                                JOptionPane.showMessageDialog(dialog, "Failed to remove user: " + errorMsg);
+                        if ("REMOVE_SUCCESS".equals(response)) {
+                            // 2. Get list of online peers to find the kicked user
+                            serverTransport.sendLine("LIST_PEERS");
+                            String peersResponse = serverTransport.readLine();
+                            Map<String, String> onlinePeers = parsePeerInfoResponse(peersResponse);
+
+                            String finalMessage = "User '" + usernameToRemove + "' has been removed from the server.";
+
+                            // 3. Check if the user is online and kick them
+                            if (onlinePeers.containsKey(usernameToRemove)) {
+                                String peerAddress = onlinePeers.get(usernameToRemove);
+                                finalMessage += "\nSending shutdown signal to peer at " + peerAddress + ".";
+                                try {
+                                    String[] parts = peerAddress.split(":");
+                                    String host = parts[0];
+                                    int port = Integer.parseInt(parts[1]);
+
+                                    // Use a temporary transport to send the kick command
+                                    try (Transport peerTransport = new TCPTransport(host, port)) {
+                                        peerTransport.sendLine("_KICK_ " + usernameToRemove);
+                                    }
+                                } catch (Exception kickEx) {
+                                    System.err.println("Could not send kick signal to " + usernameToRemove + ": " + kickEx.getMessage());
+                                    finalMessage += "\n(Could not send kick signal; peer may be offline).";
+                                }
                             }
-                        });
+
+                            // 4. Show final result to admin
+                            final String msg = finalMessage;
+                            SwingUtilities.invokeLater(() -> {
+                                JOptionPane.showMessageDialog(dialog, msg, "Removal Successful", JOptionPane.INFORMATION_MESSAGE);
+                                dialog.dispose();
+                            });
+
+                        } else {
+                            // Handle remove failure
+                            final String errorMsg = response != null ? response.replace("REMOVE_FAIL ", "") : "No response";
+                            SwingUtilities.invokeLater(() -> {
+                                JOptionPane.showMessageDialog(dialog, "Failed to remove user: " + errorMsg, "Removal Failed", JOptionPane.ERROR_MESSAGE);
+                            });
+                        }
                     } catch (IOException ex) {
                         SwingUtilities.invokeLater(() ->
-                                JOptionPane.showMessageDialog(dialog, "Error: " + ex.getMessage()));
+                                JOptionPane.showMessageDialog(dialog, "Connection error: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE));
                     }
                 });
             }
         });
+
 
         cancelBtn.addActionListener(e -> dialog.dispose());
 
