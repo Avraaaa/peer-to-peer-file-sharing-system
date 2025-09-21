@@ -162,14 +162,21 @@ public class PeerClient {
     }
 
     public void start(String sharedDirectoryPath) throws IOException {
+        System.out.println("DEBUG: PeerClient.start() called with directory: " + sharedDirectoryPath);
+
         serverTransport.sendLine("REGISTER " + myListenPort);
+        System.out.println("DEBUG: Sent REGISTER command with port: " + myListenPort);
+
         registerAndShareFiles();
+        System.out.println("DEBUG: Completed registerAndShareFiles()");
 
         Path sharedPath = Paths.get(sharedDirectoryPath);
         directoryWatcherThread = new Thread(new DirectoryWatcher(sharedPath, serverTransport));
         directoryWatcherThread.setDaemon(true);
         directoryWatcherThread.start();
+        System.out.println("DEBUG: Started directory watcher thread");
 
+        // Rest of the method stays the same...
         class TcpServerTask implements Runnable {
             private int myListenPort;
 
@@ -198,13 +205,35 @@ public class PeerClient {
         new Thread(new UdpRequestHandler(myUdpPort)).start();
         handleUserInput();
     }
-
     private void registerAndShareFiles() throws IOException {
-        for (String fileName : fileHandler.listSharedFiles()) {
-            serverTransport.sendLine("SHARE " + fileName);
-            knownSharedFiles.add(fileName);
+        List<String> sharedFiles = fileHandler.listSharedFiles();
+        System.out.println("DEBUG: Found " + sharedFiles.size() + " files to share:");
+
+        if (sharedFiles.isEmpty()) {
+            System.out.println("DEBUG: WARNING - No files found in shared directory!");
+            if (fileHandler instanceof LocalFileHandler) {
+                LocalFileHandler lh = (LocalFileHandler) fileHandler;
+                System.out.println("DEBUG: Shared directory path: " + lh.getSharedDirectory());
+                System.out.println("DEBUG: Directory exists: " + java.nio.file.Files.exists(lh.getSharedDirectory()));
+            }
+            return;
         }
+
+        for (String fileName : sharedFiles) {
+            System.out.println("DEBUG: Sharing file: " + fileName);
+            try {
+                serverTransport.sendLine("SHARE " + fileName);
+                knownSharedFiles.add(fileName);
+                System.out.println("DEBUG: Successfully sent SHARE command for: " + fileName);
+            } catch (IOException e) {
+                System.err.println("DEBUG: Failed to share file " + fileName + ": " + e.getMessage());
+                throw e;
+            }
+        }
+
+        System.out.println("DEBUG: Completed sharing " + sharedFiles.size() + " files");
     }
+
 
     private void handleUserInput() throws IOException {
         if (loggedInUser.isAdmin()) {
@@ -295,50 +324,125 @@ public class PeerClient {
     private void searchAndDownload(String fileName) throws IOException {
         serverTransport.sendLine("SEARCH " + fileName);
         String response = serverTransport.readLine();
-        Map<String, String> peersWithFile = parsePeerInfoResponse(response);
-        if (peersWithFile.isEmpty()) {
+
+        // Parse the enhanced search response format
+        Map<String, Map<String, String>> searchResults = parseEnhancedSearchResponse(response);
+
+        if (searchResults.isEmpty()) {
             System.out.println("No peers found with this file.");
             return;
         }
-        System.out.println("\nVerifying which peers have the file...");
+
+        // Flatten the results for display and validation
         Map<String, String> validPeers = new LinkedHashMap<>();
-        for (Map.Entry<String, String> entry : peersWithFile.entrySet()) {
-            if (getPeerFileSize(entry.getValue(), fileName) > -1) {
-                validPeers.put(entry.getKey(), entry.getValue());
+
+        System.out.println("\nVerifying which peers have the file...");
+        for (Map.Entry<String, Map<String, String>> fileEntry : searchResults.entrySet()) {
+            String foundFileName = fileEntry.getKey();
+            Map<String, String> peersWithFile = fileEntry.getValue();
+
+            for (Map.Entry<String, String> peerEntry : peersWithFile.entrySet()) {
+                String peerUsername = peerEntry.getKey();
+                String peerAddress = peerEntry.getValue();
+
+                // Verify peer actually has the file
+                if (getPeerFileSize(peerAddress, foundFileName) > -1) {
+                    validPeers.put(peerUsername + " (" + foundFileName + ")", peerAddress + "|" + foundFileName);
+                }
             }
         }
+
         if (validPeers.isEmpty()) {
-            System.out.println("No available peer has the file: " + fileName);
+            System.out.println("No available peer has files matching: " + fileName);
             return;
         }
-        System.out.println("\nFile found on the following peers:");
-        System.out.printf("%-20s %s\n", "Username", "Peer Address");
-        System.out.println("------------------------------------------");
+
+        System.out.println("\nFiles found matching your search:");
+        System.out.printf("%-40s %s\n", "Peer (File)", "Address");
+        System.out.println("-".repeat(70));
+
+        int index = 1;
+        Map<Integer, String> indexMap = new LinkedHashMap<>();
         for (Map.Entry<String, String> entry : validPeers.entrySet()) {
-            String user = entry.getKey();
-            String addr = entry.getValue();
-            System.out.printf("%-20s %s%n", user, addr);
+            String display = entry.getKey();
+            String value = entry.getValue();
+            System.out.printf("%d. %-38s %s\n", index, display, value.split("\\|")[0]);
+            indexMap.put(index, value);
+            index++;
         }
-        System.out.println("--------------------");
-        System.out.print("\nEnter USERNAME to download from: ");
-        String chosenUsername = new Scanner(System.in).nextLine();
-        if (validPeers.containsKey(chosenUsername)) {
-            String peerAddress = validPeers.get(chosenUsername);
-            System.out.println("Starting download of '" + fileName + "' from " + chosenUsername + " at " + peerAddress);
-            long fileSize = getPeerFileSize(peerAddress, fileName);
-            downloadStrategy.download(peerAddress, fileName);
-            if (fileSize > 0) {
-                loggedInUser.getDownloadStats().addFile();
-                loggedInUser.getDownloadStats().addBytes(fileSize);
-                updateRemoteStats();
-                System.out.println("Your download stats have been updated with the server.");
+
+        System.out.println("-".repeat(70));
+        System.out.print("\nEnter number to download: ");
+
+        try {
+            int choice = Integer.parseInt(new Scanner(System.in).nextLine());
+            if (indexMap.containsKey(choice)) {
+                String[] parts = indexMap.get(choice).split("\\|");
+                String peerAddress = parts[0];
+                String actualFileName = parts[1];
+
+                String peerUsername = validPeers.entrySet().stream()
+                        .filter(e -> e.getValue().equals(indexMap.get(choice)))
+                        .map(e -> e.getKey().split(" \\(")[0])
+                        .findFirst().orElse("Unknown");
+
+                System.out.println("Starting download of '" + actualFileName + "' from " + peerUsername + " at " + peerAddress);
+                long fileSize = getPeerFileSize(peerAddress, actualFileName);
+                downloadStrategy.download(peerAddress, actualFileName);
+
+                if (fileSize > 0) {
+                    loggedInUser.getDownloadStats().addFile();
+                    loggedInUser.getDownloadStats().addBytes(fileSize);
+                    updateRemoteStats();
+                    System.out.println("Your download stats have been updated with the server.");
+                }
+
+                serverTransport.sendLine("SHARE " + actualFileName);
+            } else {
+                System.out.println("Invalid selection.");
             }
-            serverTransport.sendLine("SHARE " + fileName);
-        } else {
-            System.out.println("Invalid username selected.");
+        } catch (NumberFormatException e) {
+            System.out.println("Invalid input. Please enter a number.");
         }
     }
 
+    // Add this new method to parse the enhanced search response
+    private Map<String, Map<String, String>> parseEnhancedSearchResponse(String response) {
+        Map<String, Map<String, String>> results = new LinkedHashMap<>();
+
+        if (response == null || response.trim().isEmpty()) {
+            return results;
+        }
+
+        // Server sends format: filename1=peer1:address1,peer2:address2;filename2=peer3:address3
+        String[] fileEntries = response.split(";");
+
+        for (String fileEntry : fileEntries) {
+            if (fileEntry.trim().isEmpty()) continue;
+
+            String[] fileParts = fileEntry.split("=", 2);
+            if (fileParts.length == 2) {
+                String fileName = fileParts[0];
+                String peerList = fileParts[1];
+
+                Map<String, String> peersForFile = new LinkedHashMap<>();
+
+                String[] peers = peerList.split(",");
+                for (String peer : peers) {
+                    String[] peerParts = peer.split(":", 2);
+                    if (peerParts.length == 2) {
+                        String username = peerParts[0];
+                        String address = peerParts[1];
+                        peersForFile.put(username, address);
+                    }
+                }
+
+                results.put(fileName, peersForFile);
+            }
+        }
+
+        return results;
+    }
     private void browseAndDownload() throws IOException {
         System.out.println("\n--- Browse Peer's Files ---");
         Map<String, String> onlinePeers = listPeers();
