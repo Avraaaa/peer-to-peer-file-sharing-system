@@ -149,15 +149,6 @@ public class Server{
                             break;
                         case "UNREGISTER":
                             return;
-                        case "DELETE_ACCOUNT":
-                            if (loggedInUser == null) {
-                                out.println("ERROR Not logged in");
-                                continue;
-                            }
-                            if (parts.length < 2) continue;
-                            handleDeleteAccount(parts[1], out);
-                            break;
-
                         default:
                             out.println("ERROR Unknown command");
                     }
@@ -173,38 +164,6 @@ public class Server{
                 System.out.println("Closed connection: " + username);
             }
         }
-
-        private void handleDeleteAccount(String username, PrintWriter out) {
-            if (!loggedInUser.getUsername().equals(username)) {
-                out.println("DELETE_FAIL Can only delete your own account");
-                return;
-            }
-
-            try {
-                if (accountService.removeUser(username)) {
-                    // Remove from active peers
-                    synchronized (activePeers) {
-                        activePeers.removeIf(peer -> peer.username.equals(username));
-                    }
-
-                    // Remove from file registry
-                    synchronized (fileRegistry) {
-                        for (FileEntry entry : fileRegistry) {
-                            entry.peers.removeIf(peer -> peer.username.equals(username));
-                        }
-                    }
-
-                    out.println("DELETE_SUCCESS");
-                    System.out.println("Account deleted: " + username);
-                } else {
-                    out.println("DELETE_FAIL Could not delete account");
-                }
-            } catch (IOException e) {
-                out.println("DELETE_FAIL " + e.getMessage());
-                System.err.println("Error deleting account " + username + ": " + e.getMessage());
-            }
-        }
-
 
         private void handleLogin(String username, String password, PrintWriter out) {
             User user = accountService.login(username, password);
@@ -322,9 +281,7 @@ public class Server{
             StringBuilder response = new StringBuilder();
 
             synchronized (activePeers) {
-                System.out.println("DEBUG: Current active peers count: " + activePeers.size());
                 for (PeerInfo pi : activePeers) {
-                    System.out.println("DEBUG: Peer - " + pi.username + " at " + pi.address);
                     if (response.length() > 0) {
                         response.append(",");
                     }
@@ -332,7 +289,6 @@ public class Server{
                 }
             }
 
-            System.out.println("DEBUG: Sending peer list response: " + response.toString());
             out.println(response);
         }
 
@@ -351,5 +307,6 @@ public class Server{
                 }
             }
         }
+
     }
 }
