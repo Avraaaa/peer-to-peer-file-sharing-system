@@ -49,16 +49,53 @@ public class AccountService {
             users.putIfAbsent("admin", createAdminWithStats());
             return;
         }
+
         for (int i = 1; i < lines.size(); i++) {
             String line = lines.get(i);
             String[] parts = line.split(",");
-            if (parts.length >= 2) {
+
+            if (parts.length >= 6) {
+                String username = parts[0];
+                String passwordHash = parts[1];
+                // Skip isAdmin field at parts[2] for regular users
+
+                User user = new RegularUser(username, passwordHash);
+
+                // Parse download stats (parts[3] and parts[4])
+                if (parts.length >= 5) {
+                    try {
+                        user.getDownloadStats().fromCsvString(parts[3] + "," + parts[4]);
+                    } catch (NumberFormatException e) {
+                        System.err.println("Warning: Invalid download stats for user " + username + ", using defaults");
+                    }
+                }
+
+                // Parse upload stats (parts[5] and parts[6])
+                if (parts.length >= 7) {
+                    try {
+                        user.getUploadStats().fromCsvString(parts[5] + "," + parts[6]);
+                    } catch (NumberFormatException e) {
+                        System.err.println("Warning: Invalid upload stats for user " + username + ", using defaults");
+                    }
+                }
+
+                users.put(user.getUsername(), user);
+
+            } else if (parts.length >= 2) {
                 User user = new RegularUser(parts[0], parts[1]);
                 if (parts.length >= 4) {
-                    user.getDownloadStats().fromCsvString(parts[2] + "," + parts[3]);
+                    try {
+                        user.getDownloadStats().fromCsvString(parts[2] + "," + parts[3]);
+                    } catch (NumberFormatException e) {
+                        System.err.println("Warning: Invalid download stats in old format for user " + parts[0] + ", using defaults");
+                    }
                 }
                 if (parts.length >= 6) {
-                    user.getUploadStats().fromCsvString(parts[4] + "," + parts[5]);
+                    try {
+                        user.getUploadStats().fromCsvString(parts[4] + "," + parts[5]);
+                    } catch (NumberFormatException e) {
+                        System.err.println("Warning: Invalid upload stats in old format for user " + parts[0] + ", using defaults");
+                    }
                 }
                 users.put(user.getUsername(), user);
             } else {
@@ -67,7 +104,6 @@ public class AccountService {
         }
         users.putIfAbsent("admin", createAdminWithStats());
     }
-
     private AdminUser createAdminWithStats() {
         DownloadStats downloadStats = new DownloadStats();
         UploadStats uploadStats = new UploadStats();
@@ -232,7 +268,7 @@ public class AccountService {
         return new String(chars);
     }
 
-    private boolean verifyPassword(String password, String storedHash) {
+    boolean verifyPassword(String password, String storedHash) {
         return hashPassword(password).equals(storedHash);
     }
 
@@ -263,4 +299,42 @@ public class AccountService {
                     adminUser.getUploadStats().toCsvString());
         }
     }
+
+    public boolean isOnlyAdmin(String username) {
+        User user = users.get(username);
+        if (user == null || !user.isAdmin()) {
+            return false;
+        }
+
+        // Count total admins
+        long adminCount = users.values().stream()
+                .filter(User::isAdmin)
+                .count();
+
+        return adminCount == 1;
+    }
+    public boolean changePassword(String username, String newPassword) throws IOException {
+        User user = users.get(username);
+        if (user == null) {
+            return false;
+        }
+
+        // new user object with updated password hash
+        String newHashedPassword = hashPassword(newPassword);
+
+        User updatedUser;
+        if (user.isAdmin()) {
+            updatedUser = new AdminUser( newHashedPassword, user.getDownloadStats(), user.getUploadStats());
+        } else {
+            updatedUser = new RegularUser(username, newHashedPassword, user.getDownloadStats(), user.getUploadStats());
+        }
+
+        // Replace user in memory
+        users.put(username, updatedUser);
+
+        // Save to file
+        rewriteUserCsvFile();
+        return true;
+    }
+
 }
